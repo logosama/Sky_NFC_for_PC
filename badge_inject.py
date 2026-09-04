@@ -1,85 +1,70 @@
 #!/usr/bin/env python3
-"""Sky 徽章注入工具
-启动后输入 s 扫描徽章，自动读取 NDEF URL 并注入游戏（游戏线程处理）。
+"""Sky badge injection tool (cross-platform)
+Scan NFC badge -> parse NDEF URL -> inject into game (game thread handles it with its own function)
+
+Dependencies:
+- Linux:  libnfc (PN532/ACR122) or pcsclite (PC/SC readers)
+- Windows: winscard.dll (built-in) or injector + sky_hook.dll
 """
-import subprocess
+import json
 import os
+import socket
 import sys
 import time
-import socket
-import glob
 
-BADGE_DUMP = "/tmp/badge.mfd"
-SOCK_PATTERN = "/tmp/sky_inject.sock.*"
-LOG_PATH = "/tmp/sky_inject.log"
-SKY_LOG = os.path.expanduser("~/.steam/steam/steamapps/common/Sky Children of the Light/Sky.log")
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
-def run(cmd, timeout=15):
-    try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        return r.stdout + r.stderr
-    except subprocess.TimeoutExpired:
-        return ""
+def load_config():
+    with open(os.path.join(PROJECT_ROOT, "config.json"), encoding="utf-8") as f:
+        return json.load(f)
 
 
-def find_main():
-    for path in sorted(glob.glob(SOCK_PATTERN)):
+def runtime_dir():
+    """Runtime directory (same as hook side): SKY_BADGE_DIR > user config dir"""
+    env = os.environ.get("SKY_BADGE_DIR")
+    if env:
+        return env
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA", ".")
+        return os.path.join(base, "sky-badge")
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return os.path.join(xdg, "sky-badge")
+    return os.path.join(os.path.expanduser("~"), ".config", "sky-badge")
+
+
+def ipc_port():
+    """Read the random port hook is listening on"""
+    port_file = os.path.join(runtime_dir(), "ipc_port")
+    for _ in range(50):  # wait up to 5 seconds
         try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(2)
-            s.connect(path)
-            s.sendall(b"ping")
-            resp = s.recv(1024).decode()
-            s.close()
-            if "main=1" in resp:
-                return path, resp
-        except Exception:
-            pass
-    return None, None
-
-
-def skyctl(cmd):
-    """直接通过 socket 发送命令到 hook"""
-    path, _ = find_main()
-    if not path:
-        return None
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(60)
-        s.connect(path)
-        s.sendall(cmd.encode() + b"\n")
-        resp = s.recv(8192).decode().strip()
-        s.close()
-        return resp
-    except Exception as e:
-        return f"ERR {e}"
-
-
-# ============ 徽章扫描 ============
-
-def scan_badge():
-    """轮询读取徽章（nfc-mfultralight 直读，徽章贴上即成功）"""
-    if os.path.exists(BADGE_DUMP):
-        os.remove(BADGE_DUMP)  # 删除旧 dump，防止误用旧数据（计数器防重放）
-    deadline = time.time() + 35
-    while time.time() < deadline:
-        out = run(f"nfc-mfultralight r {BADGE_DUMP}", timeout=5)
-        if "already claimed" in out or "Unable to open" in out:
-            print("  ✗ 串口被占用。请重插 FT232 USB 后重试")
-            return "PORT_BUSY"
-        if ("ERROR" not in out and os.path.exists(BADGE_DUMP)
-                and os.path.getsize(BADGE_DUMP) >= 540):  # NTAG215 = 540 字节
-            with open(BADGE_DUMP, "rb") as f:
-                data = f.read()
-            uid = " ".join(f"{b:02x}" for b in (data[0:3] + data[4:8]))
-            return uid
-        time.sleep(0.5)
+            with open(port_file) as f:
+                return int(f.read().strip())
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.1)
     return None
 
 
+def ipc_cmd(cmd, timeout=30):
+    """Send command to hook over TCP"""
+    port = ipc_port()
+    if not port:
+        print("  x hook not running (port file missing)")
+        return None
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        s.sendall(cmd.encode() + b"\n")
+        resp = s.recv(8192).decode(errors="replace").strip()
+        s.close()
+        return resp
+    except OSError as e:
+        print(f"  x IPC error: {e}")
+        return None
+
+
 def parse_ndef(data):
-    """解析 NTAG215 NDEF TLV，提取 URI（page 4 起）"""
+    """Parse NTAG215 NDEF TLV, extract URI (from page 4)"""
     i = 0x10
     while i < len(data) - 4:
         tag = data[i]
@@ -101,13 +86,14 @@ def parse_ndef(data):
 
 
 def parse_uri_record(ndef):
-    """解析 NDEF URI record（TNF=1, type='U'）"""
+    """Parse NDEF URI record (TNF=1, type='U')"""
     if len(ndef) < 5:
         return None
     tnf = ndef[0] & 0x07
     type_len = ndef[1]
-    payload_len = ndef[2] if (ndef[0] & 0x10) else int.from_bytes(ndef[2:6], "big")
-    idx = 3 if (ndef[0] & 0x10) else 6
+    short = bool(ndef[0] & 0x10)
+    payload_len = ndef[2] if short else int.from_bytes(ndef[2:6], "big")
+    idx = 3 if short else 6
     rec_type = ndef[idx:idx + type_len]
     payload = ndef[idx + type_len:idx + type_len + payload_len]
     if tnf == 1 and rec_type == b"U":
@@ -117,82 +103,120 @@ def parse_uri_record(ndef):
     return None
 
 
-# ============ 游戏注入 ============
+def scan_badge(cfg):
+    """Poll badge read through NFC backend"""
+    from nfc import read_badge
+    timeout = cfg.get("nfc", {}).get("scan_timeout", 35)
+    print(f"  [scan] Place badge on reader... ({timeout}s window, keep it there)")
+    try:
+        result = read_badge(timeout=timeout)
+    except RuntimeError as e:
+        print(f"  ✗ {e}")
+        return None
+    if not result:
+        print("  x badge not detected")
+        return None
+    return result
 
-def inject_url(url):
-    """hook 消息分发器 → inject 排队 → 游戏线程自动执行"""
-    ping = skyctl("ping") or ""
+
+def inject_url(url, cfg):
+    """Inject via IPC: ensure hook installed -> queue URL -> executed on game thread"""
+    ping = ipc_cmd("ping") or ""
+    print(f"  [status] {ping}")
     if "hook=0" in ping:
-        print("  [注入] 安装 hook...")
-        skyctl("hook")
-        time.sleep(0.5)
+        print("  [inject] installing hook...")
+        print(f"  [inject] {ipc_cmd('hook')}")
 
-    print("  [注入] 排队 URL（游戏线程将自动执行）...")
-    print(f"  [注入] {skyctl(f'inject {url}')}")
+    print("  [inject] queueing URL (game thread will execute)...")
+    print(f"  [inject] {ipc_cmd(f'inject {url}')}")
 
-    time.sleep(3)  # 等待消息分发器触发注入
-    with open(LOG_PATH) as f:
-        log = f.read()
-    if "INJECT done" in log:
-        print("  [结果] ✓ 注入执行成功！")
-        if os.path.exists(SKY_LOG):
-            print(f"  [游戏日志] {run(f'grep OnOpenedWithURL \"{SKY_LOG}\" | tail -2').strip()}")
-    else:
-        print("  [结果] 注入未执行（检查 /tmp/sky_inject.log）")
+    time.sleep(3)  # wait for game thread to trigger
+    log_file = os.path.join(runtime_dir(), "hook.log")
+    if os.path.exists(log_file):
+        with open(log_file) as f:
+            log = f.read()
+        if "INJECT done" in log:
+            print("  [result] OK injection executed!")
+            for line in log.splitlines():
+                if "INJECT" in line:
+                    print(f"  [log] {line}")
+        else:
+            print("  [result] injection not executed")
+            print(f"  [log] {log_file}")
 
 
-# ============ 主循环 ============
+def game_log_path():
+    """Auto-locate game log per platform (overridable via config)"""
+    cfg = load_config()
+    p = cfg.get("game", {}).get("log_path")
+    if p and p != "auto":
+        return p
+    if sys.platform == "win32":
+        # Windows Steam default paths (registry lookup ideal; fall back to common locations)
+        for base in (os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                     r"C:\Program Files (x86)", r"D:\SteamLibrary", r"E:\SteamLibrary"):
+            p = os.path.join(base, "Steam", "steamapps", "common",
+                             "Sky Children of the Light", "Sky.log")
+            if os.path.exists(p):
+                return p
+        return None
+    # Linux Steam standard paths
+    for p in (
+        os.path.expanduser("~/.steam/steam/steamapps/common/Sky Children of the Light/Sky.log"),
+        os.path.expanduser("~/.local/share/Steam/steamapps/common/Sky Children of the Light/Sky.log"),
+    ):
+        if os.path.exists(p):
+            return p
+    return None
+
 
 def main():
     print("=" * 60)
-    print("  Sky 徽章注入工具")
+    print("  Sky Badge Injection Tool")
     print("=" * 60)
+    cfg = load_config()
 
-    path, info = find_main()
-    if path:
-        print(f"✓ hook 已加载 ({info})")
+    ping = ipc_cmd("ping")
+    if ping and "main=1" in ping:
+        print(f"OK hook connected ({ping})")
     else:
-        print("⚠ 游戏/hook 未就绪。检查 Steam 启动选项:")
-        print("  LD_PRELOAD=/home/miku/Games/Sky/sky_hook.so %command%")
-
+        print("WARN hook not connected. For Linux configure Steam launch options:")
+        print(f"  LD_PRELOAD={os.path.join(PROJECT_ROOT, 'sky_hook.so')} %command%")
+        if sys.platform == "win32":
+            print("  For Windows run: python3 injector.py")
     print()
-    print("指令:  s/scan 扫描徽章并注入 | h 帮助 | q 退出")
+    print("Commands:  s/scan scan badge and inject | h help | q quit")
     print()
 
     while True:
         try:
             cmd = input("sky> ").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            print("\n再见!")
+            print("\nGoodbye!")
             break
 
         if cmd in ("q", "quit", "exit"):
-            print("再见!")
+            print("Goodbye!")
             break
         elif cmd in ("h", "help", ""):
-            print("  s/scan  扫描徽章并注入")
-            print("  q/quit  退出")
+            print("  s/scan  scan badge and inject")
+            print("  q/quit  quit")
         elif cmd in ("s", "scan"):
-            print("  [扫描] 请将徽章贴近读卡器...（30秒窗口，保持贴住）")
-            uid = scan_badge()
-            if uid == "PORT_BUSY":
+            result = scan_badge(cfg)
+            if not result:
                 continue
-            if not uid:
-                print("  ✗ 未检测到徽章")
-                continue
-            print(f"  ✓ 发现徽章 UID: {uid}")
+            uid, data = result
+            print(f"  OK badge UID: {uid}")
 
-            with open(BADGE_DUMP, "rb") as f:
-                data = f.read()
             url = parse_ndef(data)
             if not url:
-                print("  ✗ NDEF 解析失败（查看 /tmp/badge.mfd）")
+                print("  x NDEF parse failed")
                 continue
-            print(f"  ✓ NDEF URL: {url[:70]}...")
+            print(f"  OK NDEF URL: {url[:70]}...")
 
-            inject_url(url)
+            inject_url(url, cfg)
         else:
-            print(f"  未知指令: {cmd}")
+            print(f"  unknown command: {cmd}")
 
 
 if __name__ == "__main__":

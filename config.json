@@ -1,0 +1,21 @@
+{
+  "paths": {
+    "work_dir": "data",
+    "log_file": "data/hook.log",
+    "badge_dump": "data/badge.mfd",
+    "ipc_port_file": "data/ipc_port"
+  },
+  "ipc": {
+    "host": "127.0.0.1",
+    "port": 0
+  },
+  "nfc": {
+    "backend": "auto",
+    "scan_timeout": 35,
+    "poll_interval": 0.5
+  },
+  "game": {
+    "exe_path": "auto",
+    "log_path": "auto"
+  }
+}

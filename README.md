@@ -1,24 +1,75 @@
-## 简介
-在AI辅助下开发的用于实现SKY PC端的NFC徽章触发工具
+# Sky Badge Injection Tool
 
-## 使用方法
-首先在steam中添加启动参数指定`.so`文件
+AI-assisted tool to trigger NFC badge effects in Sky: Children of the Light on PC (Linux + Windows).
+
+## How it works
+
 ```
-LD_PRELOAD=path_to_hookfile %command%
+NFC badge -> reader extracts NDEF URL -> TCP IPC -> hook in game process
+          -> game main thread calls its own OnOpenedWithURL -> server verification -> badge effect
 ```
-然后启动游戏，之后启动脚本
-```bash
-python3 badge_inject.py
+
+Pattern scanning auto-locates game functions (survives minor game updates), no hardcoded addresses.
+
+## Project structure
+
 ```
-## 技术实现
-使用hook注入，调用游戏自身NFC函数走服务器验证
-目前hook函数不确定具体是什么，可能是与游戏中的“大叫”动作对应...
+├── config.json         # Configuration (NFC backend, timeouts, paths)
+├── patterns.json       # Function signature library (append on major game updates)
+├── badge_inject.py     # Main tool (scan + inject, cross-platform)
+├── skyctl.py           # Injection control client
+├── injector.py         # Windows DLL injector
+├── build.sh            # One-shot build for Linux .so + Windows .dll
+├── hook/
+│   ├── common.c/h      # Shared core (trampoline/pattern scan/TCP IPC/injection)
+│   ├── linux.c         # Linux platform layer (LD_PRELOAD)
+│   └── windows.c       # Windows platform layer (DLL)
+└── nfc/
+    ├── __init__.py     # NFC backend abstraction + auto-selection
+    ├── libnfc_cli.py   # libnfc backend (PN532/ACR122)
+    └── pcsc_ctypes.py  # PC/SC backend (USB readers, cross-platform)
+```
 
-## 可能遇见的问题
-- 随着Sky版本更新，游戏的NFC处理函数`OnOpenedWithURL()`的地址可能发生变化需要随版本更新
+## Usage (Linux)
 
-## 写在最后
-因为本人不是很专业，所以应该可以有很多方面能够完善，算是抛砖引玉了，希望有技术的人能够完善这个需求可能比较小众的工具
+1. Build: `./build.sh`
+2. Steam launch options:
+   ```
+   LD_PRELOAD=/path/to/sky_hook.so %command%
+   ```
+   (Optional: add `SKY_BADGE_DIR=/path/to/project` to set the runtime directory;
+   defaults to `~/.config/sky-badge/`)
+3. Launch the game, log in, then run: `python3 badge_inject.py`
+4. Enter `s` and place the badge on the reader
 
-## 免责声明
-请使用者自行承担相关风险！！！
+## Usage (Windows)
+
+1. Cross-compile on Linux: `./build.sh` (produces sky_hook.dll)
+   or build on Windows: `x86_64-w64-mingw32-gcc -shared -O2 -o sky_hook.dll hook/common.c hook/windows.c -lws2_32`
+2. After starting the game run: `python3 injector.py`
+3. `python3 badge_inject.py` -> `s` -> place the badge
+
+## Supported NFC devices
+
+| Backend | Devices | Platform |
+|---------|---------|----------|
+| libnfc | PN532 (UART/SPI), ACR122U and more | Linux |
+| PC/SC | Any CCID/PCSC reader | Linux + Windows |
+
+Auto-detected by default (fix via `nfc.backend` in config.json: `auto`/`libnfc`/`pcsc`).
+
+Optional dependencies: [pyscard](https://pypi.org/project/pyscard/) can replace the
+built-in ctypes PC/SC backend if needed - the abstraction layer allows plugging in
+any Python PC/SC implementation.
+
+## Handling game updates
+
+When a major game update changes function prologues:
+1. Reverse-engineer the new function addresses
+2. Extract the first 16-32 bytes of each function (use `??` wildcards for
+   RIP-relative offsets and immediates)
+3. Append to `patterns.json` and sync the signature arrays in `hook/common.c`
+
+## Disclaimer
+
+Use at your own risk.

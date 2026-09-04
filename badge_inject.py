@@ -85,13 +85,16 @@ def parse_uri_record(ndef):
     return None
 
 
-def scan_badge(cfg):
+def scan_badge(cfg, backend=None):
     """Poll badge read through NFC backend"""
     from nfc import read_badge
     timeout = cfg.get("nfc", {}).get("scan_timeout", 35)
-    print(f"  [scan] Place badge on reader... ({timeout}s window, keep it there)")
+    if backend == "remote":
+        print(f"  [scan] Waiting for phone scan... ({timeout}s window)")
+    else:
+        print(f"  [scan] Place badge on reader... ({timeout}s window, keep it there)")
     try:
-        result = read_badge(timeout=timeout)
+        result = read_badge(timeout=timeout, backend=backend)
     except RuntimeError as e:
         print(f"  x {e}")
         return None
@@ -153,6 +156,7 @@ def game_log_path():
 
 
 def main():
+    remote_mode = "--remote" in sys.argv[1:]
     print("=" * 60)
     print("  Sky Badge Injection Tool")
     print("=" * 60)
@@ -167,6 +171,11 @@ def main():
         if sys.platform == "win32":
             print("  For Windows run: python3 injector.py")
     print()
+    if remote_mode:
+        from nfc import remote
+        remote.ensure_server_started()
+        port = cfg.get("remote", {}).get("port", 8799)
+        print(f"Mode: remote (listening on 0.0.0.0:{port} - phone scans are queued)")
     print("Commands:  s/scan scan badge and inject | h help | q quit")
     print()
 
@@ -184,7 +193,8 @@ def main():
             print("  s/scan  scan badge and inject")
             print("  q/quit  quit")
         elif cmd in ("s", "scan"):
-            result = scan_badge(cfg)
+            backend = "remote" if remote_mode else None
+            result = scan_badge(cfg, backend=backend)
             if not result:
                 continue
             uid, data = result

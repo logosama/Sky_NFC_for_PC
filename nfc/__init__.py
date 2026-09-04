@@ -14,6 +14,10 @@ def get_backend(name=None):
 
     from nfc import libnfc_cli, pcsc_ctypes  # noqa: E402
 
+    if backend == "remote":
+        from nfc import remote
+        return remote.RemoteBackend()
+
     backends = []
     if backend in ("auto", "libnfc"):
         backends.append(libnfc_cli.LibnfcBackend())

@@ -30,8 +30,13 @@ falls back to the signatures in `patterns.json`.
 └── nfc/
     ├── __init__.py     # NFC backend abstraction + auto-selection
     ├── libnfc_cli.py   # libnfc backend (PN532/ACR122)
-    └── pcsc_ctypes.py  # PC/SC backend (USB readers, cross-platform)
+    ├── pcsc_ctypes.py  # PC/SC backend (USB readers, cross-platform)
+    └── remote.py       # Remote backend (receives dumps from the Android app)
 ```
+
+`android/` is a separate Gradle project: the Sky Badge Relay app that turns a
+phone's NFC into a badge reader (add-on feature, the local reader path is
+untouched).
 
 ## Runtime directory
 
@@ -71,12 +76,43 @@ hardware yet.
 |---------|---------|----------|
 | libnfc | PN532 (UART/SPI), ACR122U and more | Linux |
 | PC/SC | Any CCID/PCSC reader | Linux + Windows |
+| remote | Android phone via Sky Badge Relay app | LAN (Linux + Windows) |
 
 Auto-detected by default (fix via `nfc.backend` in config.json: `auto`/`libnfc`/`pcsc`).
 
 Optional dependencies: [pyscard](https://pypi.org/project/pyscard/) can replace the
 built-in ctypes PC/SC backend if needed - the abstraction layer allows plugging in
 any Python PC/SC implementation.
+
+## Phone NFC relay (Android)
+
+Use a phone's NFC as an additional badge reader:
+
+```
+Android app reads NTAG215 -> raw 540-byte dump -> HTTP POST /inject on the PC
+                          -> remote backend -> same parse/inject pipeline
+```
+
+Each injection still requires a fresh physical scan (badge counter anti-replay),
+so the app never caches dumps.
+
+**PC side**:
+
+1. Run `python3 badge_inject.py --remote` (starts the HTTP listener on port 8799,
+   configurable via `remote.port` in config.json; optional auth via `remote.token`)
+2. Enter `s` to open the scan window
+3. Allow inbound TCP 8799 through the firewall
+
+**Phone side**:
+
+1. Build: `cd android && ./gradlew assembleDebug`
+2. Install: `adb install app/build/outputs/apk/debug/app-debug.apk`
+   (or open `android/` in Android Studio)
+3. Open Sky Badge Relay, enter the PC's LAN IP (port/token optional), Save
+4. Hold the badge against the phone - a short vibration confirms success
+
+Protocol: `POST /inject` with JSON `{"data_base64": "<540-byte NTAG dump>"}`,
+optional `X-Auth-Token` header. The PC responds `200 {"status":"accepted"}`.
 
 ## Troubleshooting
 

@@ -5,6 +5,10 @@
     "poll_interval": 0.5,
     "badge_dump": "badge.mfd"
   },
+  "remote": {
+    "port": 8799,
+    "token": ""
+  },
   "game": {
     "log_path": "auto"
   }

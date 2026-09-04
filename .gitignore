@@ -2,3 +2,7 @@
 __pycache__/
 *.mfd
 badge.mfd
+local.properties
+android/.gradle/
+android/build/
+android/app/build/

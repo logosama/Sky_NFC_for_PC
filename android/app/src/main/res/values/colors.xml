@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="app_primary">#4A6572</color>
+    <color name="app_on_primary">#FFFFFF</color>
+    <color name="app_surface">#FFFBFE</color>
+    <color name="app_status_ok">#2E7D32</color>
+    <color name="app_status_err">#C62828</color>
+    <color name="ic_launcher_background">#4A6572</color>
+</resources>

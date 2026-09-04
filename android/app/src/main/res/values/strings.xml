@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sky Badge Relay</string>
+    <string name="status_ready">Ready — hold the badge against the phone</string>
+    <string name="status_nfc_missing">This device has no NFC</string>
+    <string name="status_reading">Reading badge… (UID %1$s)</string>
+    <string name="status_reading_progress">Reading… %1$d/%2$d pages (UID %3$s)</string>
+    <string name="status_sending">Sending to PC… (UID %1$s)</string>
+    <string name="status_sent">Sent — injection queued on PC (UID %1$s)</string>
+    <string name="status_error">Error: %1$s</string>
+    <string name="settings_title">PC connection</string>
+    <string name="hint_ip">PC IP address (e.g. 192.168.1.100)</string>
+    <string name="hint_port">Port (default 8799)</string>
+    <string name="hint_token">Token (optional)</string>
+    <string name="btn_save">Save</string>
+    <string name="btn_saved">Saved</string>
+    <string name="help_text">Run \u201cbadge_inject.py --remote\u201d on the PC, enter its IP above, then hold the Sky badge against the phone. Each injection needs a fresh scan.</string>
+    <string name="desc_status">Scan status</string>
+    <string name="desc_ip">PC IP address input</string>
+    <string name="desc_port">Port input</string>
+    <string name="desc_token">Token input</string>
+    <string name="desc_save">Save connection settings</string>
+</resources>

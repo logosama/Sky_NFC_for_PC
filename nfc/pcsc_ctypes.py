@@ -5,10 +5,8 @@ Reads NTAG215 page by page via APDU (FF B0 00 <page> 04).
 """
 import ctypes
 import ctypes.util
-import os
 import sys
 
-from nfc import badge_dump_path
 
 # ============ PC/SC Constants ============
 SCARD_SCOPE_USER = 0
@@ -151,11 +149,3 @@ class PcscBackend:
             return uid, bytes(data)
         finally:
             self._f_disconnect(card, 0)
-
-
-def save_dump(uid, data):
-    dump = badge_dump_path()
-    os.makedirs(os.path.dirname(dump), exist_ok=True)
-    with open(dump, "wb") as f:
-        f.write(data)
-    return uid

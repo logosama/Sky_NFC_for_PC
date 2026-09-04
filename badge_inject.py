@@ -6,50 +6,12 @@ Dependencies:
 - Linux:  libnfc (PN532/ACR122) or pcsclite (PC/SC readers)
 - Windows: winscard.dll (built-in) or injector + sky_hook.dll
 """
-import json
 import os
 import socket
 import sys
 import time
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-
-
-def load_config():
-    with open(os.path.join(PROJECT_ROOT, "config.json"), encoding="utf-8") as f:
-        return json.load(f)
-
-
-def runtime_dirs():
-    """Runtime directories to probe, in priority order.
-    Mirrors the hook side: SKY_BADGE_DIR is preferred, but under Proton the
-    LD_PRELOAD dir is bind-mounted read-only inside the sandbox, so the hook
-    falls back to the user config dir. Probe both."""
-    dirs = []
-    env = os.environ.get("SKY_BADGE_DIR")
-    if env:
-        dirs.append(env)
-    if sys.platform == "win32":
-        dirs.append(os.path.join(os.environ.get("APPDATA", "."), "sky-badge"))
-    else:
-        xdg = os.environ.get("XDG_CONFIG_HOME")
-        if xdg:
-            dirs.append(os.path.join(xdg, "sky-badge"))
-        dirs.append(os.path.join(os.path.expanduser("~"), ".config", "sky-badge"))
-    seen = []
-    for d in dirs:
-        if d not in seen:
-            seen.append(d)
-    return seen
-
-
-def find_runtime_file(name):
-    """Return path of runtime file if present in any runtime dir"""
-    for d in runtime_dirs():
-        p = os.path.join(d, name)
-        if os.path.exists(p):
-            return p
-    return None
+from runtime import find_runtime_file, load_config, PROJECT_ROOT
 
 
 def ipc_port():

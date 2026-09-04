@@ -2,32 +2,14 @@
 Unified interface: read_badge(timeout) -> (uid, ndef_bytes) or None
 Backend selection: config.json nfc.backend (auto|libnfc|pcsc)
 """
-import os
-import sys
 import time
-import json
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def _load_config():
-    cfg_path = os.path.join(PROJECT_ROOT, "config.json")
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _work_dir():
-    cfg = _load_config()
-    wd = cfg.get("paths", {}).get("work_dir", "data")
-    return os.path.join(PROJECT_ROOT, wd)
+from runtime import badge_dump_path, load_config
 
 
 def get_backend(name=None):
     """Get NFC backend by name or auto-detect"""
-    cfg = _load_config()
+    cfg = load_config()
     backend = name or cfg.get("nfc", {}).get("backend", "auto")
 
     from nfc import libnfc_cli, pcsc_ctypes  # noqa: E402
@@ -46,6 +28,9 @@ def get_backend(name=None):
 
 def read_badge(timeout=35, backend=None):
     """Read badge, returns (uid, ndef_bytes). Polls until timeout or success."""
+    cfg = load_config()
+    interval = cfg.get("nfc", {}).get("poll_interval", 0.5)
+
     b = get_backend(backend)
     if not b:
         raise RuntimeError("No NFC backend available (check libnfc or PC/SC reader)")
@@ -55,11 +40,5 @@ def read_badge(timeout=35, backend=None):
         result = b.read_once()
         if result:
             return result
-        time.sleep(0.5)
+        time.sleep(interval)
     return None
-
-
-def badge_dump_path():
-    cfg = _load_config()
-    name = cfg.get("paths", {}).get("badge_dump", "badge.mfd")
-    return os.path.join(_work_dir(), name)

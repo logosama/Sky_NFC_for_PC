@@ -8,9 +8,7 @@
 #include <stddef.h>
 
 /* ============ Configuration constants ============ */
-#define LOG_FILE_REL   "data/hook.log"
-#define PORT_FILE_REL  "data/ipc_port"
-#define IPC_HOST       "127.0.0.1"
+#define IPC_HOST "127.0.0.1"
 
 /* ============ Platform abstraction interfaces (implemented by platform layer) ============ */
 typedef struct {
@@ -42,7 +40,7 @@ int  hook_is_installed(void);
 /* ============ Injection queue (set by IPC thread, executed on game thread) ============ */
 extern volatile char *g_pending_url;
 extern volatile int   g_pending;
-extern uint64_t       g_onopenurl_fn;   /* OnOpenedWithURL function address (pattern scan result) */
+extern uint64_t       g_onopenurl_fn;   /* OnOpenedWithURL function address (fixed addr, pattern-scan fallback) */
 extern uint64_t       g_onurl_vt;       /* host class vtable */
 extern uint64_t       g_onurl_this;     /* host class instance (auto-found cache) */
 extern volatile long  g_tick_count;
@@ -50,9 +48,10 @@ extern volatile long  g_tick_count;
 void do_inject(void);   /* called on game main thread by trampoline */
 
 /* ============ Main entry (called by platform layer) ============ */
-int  common_init(void);  /* pattern scan + IPC start, returns 0 on success */
+int  common_init(void);  /* resolve addresses + IPC start, returns 0 on success */
 
-/* Unified runtime directory: SKY_BADGE_DIR env var first, otherwise user config dir
+/* Unified runtime directory: SKY_BADGE_DIR env var first (with write probe;
+ * falls back if read-only, e.g. Proton sandbox), then user config dir
  * Linux: ~/.config/sky-badge/   Windows: %APPDATA%\sky-badge\ */
 void badge_dir_path(char *buf, size_t len, const char *subpath);
 

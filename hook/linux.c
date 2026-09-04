@@ -52,7 +52,7 @@ int plat_protect_rwx(uint64_t addr, size_t len) {
     return mprotect((void *)(uintptr_t)page, len, PROT_READ | PROT_WRITE | PROT_EXEC);
 }
 
-/* ============ Sky.exe module info（/proc/self/maps） ============ */
+/* ============ Sky.exe module info (/proc/self/maps) ============ */
 int plat_get_module(module_info_t *mi) {
     memset(mi, 0, sizeof(*mi));
     FILE *f = fopen("/proc/self/maps", "r");
@@ -66,19 +66,28 @@ int plat_get_module(module_info_t *mi) {
     }
     if (!is_sky) { fclose(f); return -1; }
     rewind(f);
-    /* .text and .rdata section addresses (Sky.exe PE layout, version independent) */
+    /* Pass 1: find .text (first executable segment at/after 0x140001000) */
     while (fgets(l, sizeof(l), f)) {
         uint64_t s, e; char p[8];
         if (sscanf(l, "%lx-%lx %7s", &s, &e, p) != 3) continue;
         if (s < 0x140000000ULL || s >= 0x146000000ULL) continue;
         if (mi->base == 0 || s < mi->base) mi->base = s;
         if (s + (e - s) > mi->size) mi->size = (s - mi->base) + (e - s);
-        if (strchr(p, 'x') && mi->text_size == 0) {
-            /* first executable segment = .text */
-            if (s >= 0x140001000ULL) { mi->text_start = s; mi->text_size = e - s; }
+        if (strchr(p, 'x') && s >= 0x140001000ULL && mi->text_size == 0) {
+            mi->text_start = s; mi->text_size = e - s;
         }
-        if (strchr(p, 'r') && !strchr(p, 'x') && !strchr(p, 'w') && s > mi->text_start && mi->rdata_size == 0) {
-            /* first read-only segment after .text = .rdata */
+    }
+    /* Pass 2: find .rdata (first read-only non-exec segment after .text).
+     * The PE header mapping at 0x140000000 must NOT qualify, so require
+     * text_start to already be set and s to be past the .text region. */
+    rewind(f);
+    while (fgets(l, sizeof(l), f)) {
+        uint64_t s, e; char p[8];
+        if (sscanf(l, "%lx-%lx %7s", &s, &e, p) != 3) continue;
+        if (s < 0x140000000ULL || s >= 0x146000000ULL) continue;
+        if (mi->text_start && s >= mi->text_start + mi->text_size &&
+            strchr(p, 'r') && !strchr(p, 'x') && !strchr(p, 'w') &&
+            mi->rdata_size == 0) {
             mi->rdata_start = s; mi->rdata_size = e - s;
         }
     }
@@ -100,13 +109,38 @@ int plat_is_main_process(void) {
 }
 
 /* ============ Entry point (LD_PRELOAD constructor) ============ */
+/* Under Proton, the .so is loaded into the wine process BEFORE Sky.exe's
+ * PE image is mapped, so a constructor-time check would always fail.
+ * Instead, spawn a detached thread that polls /proc/self/maps for the
+ * Sky.exe mapping and then initializes. Non-game processes that load the
+ * hook simply never find the mapping and give up after a timeout. */
+#include <pthread.h>
+
+static void *probe_thread(void *arg) {
+    (void)arg;
+    plat_log("probe: waiting for Sky.exe module");
+    for (int i = 0; i < 600; i++) {
+        /* Qualify: the game image must be FULLY mapped. Other wine processes
+         * (e.g. the steam.exe DRM wrapper) may map only the PE header plus a
+         * small slice of .text while verifying the executable - they must not
+         * trigger initialization (or they would hijack the IPC port file). */
+        module_info_t mi;
+        if (plat_is_main_process() && plat_get_module(&mi) == 0 &&
+            mi.text_size >= 0x100000 && mi.rdata_start > mi.text_start) {
+            common_init();
+            return NULL;
+        }
+        struct timespec ts = {0, 500 * 1000 * 1000}; /* 500 ms */
+        nanosleep(&ts, NULL);
+    }
+    plat_log("probe: timed out waiting for Sky.exe module");
+    return NULL;
+}
+
 __attribute__((constructor))
 static void sky_hook_init(void) {
     plat_log("loaded");
-    /* Initialize only in main process (actual Sky.exe); skip other processes that loaded the hook */
-    if (!plat_is_main_process()) {
-        plat_log("skip: not main process");
-        return;
-    }
-    common_init();
+    pthread_t t;
+    if (pthread_create(&t, NULL, probe_thread, NULL) == 0)
+        pthread_detach(t);
 }

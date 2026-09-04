@@ -20,29 +20,49 @@ def load_config():
         return json.load(f)
 
 
-def runtime_dir():
-    """Runtime directory (same as hook side): SKY_BADGE_DIR > user config dir"""
+def runtime_dirs():
+    """Runtime directories to probe, in priority order.
+    Mirrors the hook side: SKY_BADGE_DIR is preferred, but under Proton the
+    LD_PRELOAD dir is bind-mounted read-only inside the sandbox, so the hook
+    falls back to the user config dir. Probe both."""
+    dirs = []
     env = os.environ.get("SKY_BADGE_DIR")
     if env:
-        return env
+        dirs.append(env)
     if sys.platform == "win32":
-        base = os.environ.get("APPDATA", ".")
-        return os.path.join(base, "sky-badge")
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg:
-        return os.path.join(xdg, "sky-badge")
-    return os.path.join(os.path.expanduser("~"), ".config", "sky-badge")
+        dirs.append(os.path.join(os.environ.get("APPDATA", "."), "sky-badge"))
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        if xdg:
+            dirs.append(os.path.join(xdg, "sky-badge"))
+        dirs.append(os.path.join(os.path.expanduser("~"), ".config", "sky-badge"))
+    seen = []
+    for d in dirs:
+        if d not in seen:
+            seen.append(d)
+    return seen
+
+
+def find_runtime_file(name):
+    """Return path of runtime file if present in any runtime dir"""
+    for d in runtime_dirs():
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def ipc_port():
     """Read the random port hook is listening on"""
-    port_file = os.path.join(runtime_dir(), "ipc_port")
     for _ in range(50):  # wait up to 5 seconds
-        try:
-            with open(port_file) as f:
-                return int(f.read().strip())
-        except (FileNotFoundError, ValueError):
-            time.sleep(0.1)
+        port_file = find_runtime_file("ipc_port")
+        if port_file:
+            try:
+                with open(port_file) as f:
+                    return int(f.read().strip())
+            except ValueError:
+                pass
+        time.sleep(0.1)
     return None
 
 
@@ -111,7 +131,7 @@ def scan_badge(cfg):
     try:
         result = read_badge(timeout=timeout)
     except RuntimeError as e:
-        print(f"  ✗ {e}")
+        print(f"  x {e}")
         return None
     if not result:
         print("  x badge not detected")
@@ -131,8 +151,8 @@ def inject_url(url, cfg):
     print(f"  [inject] {ipc_cmd(f'inject {url}')}")
 
     time.sleep(3)  # wait for game thread to trigger
-    log_file = os.path.join(runtime_dir(), "hook.log")
-    if os.path.exists(log_file):
+    log_file = find_runtime_file("hook.log")
+    if log_file:
         with open(log_file) as f:
             log = f.read()
         if "INJECT done" in log:

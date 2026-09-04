@@ -3,13 +3,15 @@
   "note": "Game function signature library. ?? is a wildcard (RIP-relative offsets/immediates). When a game update changes function prologues, reverse-engineer the new addresses and append entries.",
   "patterns": {
     "hook_addr": {
-      "signature": "55 56 48 83 EC 28 48 8D 6C 24 20 48 89 CE 48 8D 15 ?? ?? ?? ?? E8 ?? ?? ?? ??",
+      "signature": "55 56 48 83 EC 28 48 8D 6C 24 20 48 89 CE 48 8D 15 5A 9B 6D 00 E8 ?? ?? ?? ?? 85 C0 0F 84 ?? ?? ?? ??",
       "section": "text",
+      "note": "The first LEA displacement (5A 9B 6D 00, points to message name strings in .rdata) is kept exact to disambiguate from 35 sibling functions with identical prologues.",
       "description": "Message dispatcher (high-frequency call point on game thread, injection trigger function)"
     },
     "onopenurl": {
-      "signature": "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC ?? ?? ?? ?? 48 8D AC 24 80 00 00 00 44 89 C3 48 89",
+      "signature": "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 98 09 00 00 48 8D AC 24 80 00 00 00 44 89 C3 48 89 D7 48 89 CE 4C 8D B1 A0 11 00 00 48 89 D1 4C 89 F2",
       "section": "text",
+      "note": "Stack frame size (98 09 00 00 = 0x998) and class field offset (A0 11 00 00) are kept exact to disambiguate from 12 sibling functions with identical prologues.",
       "description": "Game::OnOpenedWithURL badge URL handler"
     }
   },

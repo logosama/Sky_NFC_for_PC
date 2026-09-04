@@ -16,26 +16,53 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #endif
 
 /* ============ Runtime directory (unified cross-platform location) ============ */
-void badge_dir_path(char *buf, size_t len, const char *subpath) {
-    const char *dir = getenv("SKY_BADGE_DIR");  /* Priority: explicitly specified project directory */
+/* NOTE: under Steam Proton, the directory referenced by LD_PRELOAD is
+ * bind-mounted READ-ONLY inside the pressure-vessel sandbox, so a
+ * SKY_BADGE_DIR pointing at the project dir becomes unwritable there.
+ * Resolve once with a write probe and fall back to the user config dir. */
+static char g_base_dir[512];
+static int g_base_dir_set = 0;
+
+static void resolve_base_dir(void) {
+    if (g_base_dir_set) return;
+    g_base_dir_set = 1;
+    const char *dir = getenv("SKY_BADGE_DIR");
     if (dir && *dir) {
-        snprintf(buf, len, "%s/%s", dir, subpath);
-        return;
+        char test[600];
+        snprintf(test, sizeof(test), "%s/.wtest", dir);
+        FILE *f = fopen(test, "w");
+        if (f) {
+            fclose(f);
+            unlink(test);
+            snprintf(g_base_dir, sizeof(g_base_dir), "%s", dir);
+            return;
+        }
     }
 #ifdef _WIN32
     const char *appdata = getenv("APPDATA");
-    if (appdata && *appdata) snprintf(buf, len, "%s\\sky-badge\\%s", appdata, subpath);
-    else snprintf(buf, len, "sky-badge\\%s", subpath);
+    if (appdata && *appdata) snprintf(g_base_dir, sizeof(g_base_dir), "%s\\sky-badge", appdata);
+    else snprintf(g_base_dir, sizeof(g_base_dir), "sky-badge");
 #else
     const char *xdg = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
-    if (xdg && *xdg) snprintf(buf, len, "%s/sky-badge/%s", xdg, subpath);
-    else if (home && *home) snprintf(buf, len, "%s/.config/sky-badge/%s", home, subpath);
-    else snprintf(buf, len, "sky-badge/%s", subpath);
+    if (xdg && *xdg) snprintf(g_base_dir, sizeof(g_base_dir), "%s/sky-badge", xdg);
+    else if (home && *home) snprintf(g_base_dir, sizeof(g_base_dir), "%s/.config/sky-badge", home);
+    else snprintf(g_base_dir, sizeof(g_base_dir), "sky-badge");
 #endif
+#ifdef _WIN32
+    CreateDirectoryA(g_base_dir, NULL);
+#else
+    mkdir(g_base_dir, 0755);
+#endif
+}
+
+void badge_dir_path(char *buf, size_t len, const char *subpath) {
+    resolve_base_dir();
+    snprintf(buf, len, "%s/%s", g_base_dir, subpath);
 }
 
 /* ============ Logging ============ */
@@ -51,7 +78,12 @@ void common_log(const char *fmt, ...) {
     if (!g_logfp) return;
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
-    fprintf(g_logfp, "[%02d:%02d:%02d] ", tm->tm_hour, tm->tm_min, tm->tm_sec);
+#ifdef _WIN32
+    fprintf(g_logfp, "[%02d:%02d:%02d] %lu ", tm->tm_hour, tm->tm_min, tm->tm_sec,
+            (unsigned long)GetCurrentProcessId());
+#else
+    fprintf(g_logfp, "[%02d:%02d:%02d] %d ", tm->tm_hour, tm->tm_min, tm->tm_sec, getpid());
+#endif
     va_list ap;
     va_start(ap, fmt);
     vfprintf(g_logfp, fmt, ap);
@@ -78,13 +110,14 @@ static char     g_inject_buf[4096];
 /* ============ Signature patterns (synced with patterns.json; 0xFF=wildcard) ============ */
 static const uint8_t SIG_HOOK_ADDR[] = {
     0x55, 0x56, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8D, 0x6C, 0x24, 0x20,
-    0x48, 0x89, 0xCE, 0x48, 0x8D, 0x15, 0xFF, 0xFF, 0xFF, 0xFF, 0xE8,
-    0xFF, 0xFF, 0xFF, 0xFF
+    0x48, 0x89, 0xCE, 0x48, 0x8D, 0x15, 0x5A, 0x9B, 0x6D, 0x00, 0xE8,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x85, 0xC0, 0x0F, 0x84, 0xFF, 0xFF, 0xFF, 0xFF
 };
 static const uint8_t SIG_ONOPENURL[] = {
     0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x56, 0x57, 0x53,
-    0x48, 0x81, 0xEC, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0x8D, 0xAC, 0x24, 0x80,
-    0x00, 0x00, 0x00, 0x44, 0x89, 0xC3, 0x48, 0x89
+    0x48, 0x81, 0xEC, 0x98, 0x09, 0x00, 0x00, 0x48, 0x8D, 0xAC, 0x24, 0x80,
+    0x00, 0x00, 0x00, 0x44, 0x89, 0xC3, 0x48, 0x89, 0xD7, 0x48, 0x89, 0xCE,
+    0x4C, 0x8D, 0xB1, 0xA0, 0x11, 0x00, 0x00, 0x48, 0x89, 0xD1, 0x4C, 0x89, 0xF2
 };
 
 /* ============ Pattern scan ============ */
@@ -413,13 +446,11 @@ static int ipc_start(uint16_t *out_port) {
     uint16_t port = ntohs(ad.sin_port);
     if (out_port) *out_port = port;
 
-    const char *dir = getenv("SKY_BADGE_DIR");
     char path[512];
     badge_dir_path(path, sizeof(path), "ipc_port");
     FILE *f = fopen(path, "w");
     if (f) { fprintf(f, "%d\n", port); fclose(f); }
-    LOG("IPC listening on %s:%d (port file %s)", IPC_HOST, port, path);
-    g_srv_sock = s;
+    LOG("IPC listening on %s:%d (port file %s)", IPC_HOST, port, path);    g_srv_sock = s;
     return 0;
 }
 
@@ -490,6 +521,28 @@ static int spawn_thread(void) {
 #endif
 
 /* ============ Initialization (called by platform layer) ============ */
+/* Known-good addresses for game build 0.34.5 (build 410941). Fixed addresses
+ * are used as primary resolution per project decision; if the bytes at those
+ * addresses no longer match (game update), fall back to pattern scan. */
+#define FIXED_ONOPENURL   0x1411221e0ULL
+#define FIXED_HOOK_TARGET 0x1418b0b10ULL
+#define FIXED_VTABLE      0x141e8a390ULL
+
+static const uint8_t MAGIC_ONOPENURL[] = {
+    0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x56, 0x57, 0x53,
+    0x48, 0x81, 0xEC, 0x98, 0x09, 0x00, 0x00
+};
+static const uint8_t MAGIC_HOOK_TARGET[] = {
+    0x55, 0x56, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8D, 0x6C, 0x24, 0x20,
+    0x48, 0x89, 0xCE, 0x48, 0x8D, 0x15
+};
+
+static int mem_matches(uint64_t addr, const uint8_t *magic, size_t len) {
+    uint8_t buf[32];
+    if (len > sizeof(buf) || plat_read_mem(addr, buf, len) != 0) return 0;
+    return memcmp(buf, magic, len) == 0;
+}
+
 int common_init(void) {
     LOG("common init, main_process=%d", plat_is_main_process());
 
@@ -502,18 +555,30 @@ int common_init(void) {
         (unsigned long)mi.base, (unsigned long)mi.text_start, (unsigned long)mi.text_size,
         (unsigned long)mi.rdata_start, (unsigned long)mi.rdata_size);
 
-    /* Pattern scan to locate functions */
-    g_onopenurl_fn = pattern_scan(&mi, SIG_ONOPENURL, sizeof(SIG_ONOPENURL));
-    g_hook_target = pattern_scan(&mi, SIG_HOOK_ADDR, sizeof(SIG_HOOK_ADDR));
-    LOG("pattern scan: onopenurl=0x%lx hook_target=0x%lx",
+    /* Fixed addresses first (fast and reliable), pattern scan as fallback */
+    g_onopenurl_fn = FIXED_ONOPENURL;
+    if (!mem_matches(FIXED_ONOPENURL, MAGIC_ONOPENURL, sizeof(MAGIC_ONOPENURL))) {
+        LOG("fixed onopenurl 0x%lx mismatch - falling back to pattern scan",
+            (unsigned long)FIXED_ONOPENURL);
+        g_onopenurl_fn = pattern_scan(&mi, SIG_ONOPENURL, sizeof(SIG_ONOPENURL));
+    }
+    g_hook_target = FIXED_HOOK_TARGET;
+    if (!mem_matches(FIXED_HOOK_TARGET, MAGIC_HOOK_TARGET, sizeof(MAGIC_HOOK_TARGET))) {
+        LOG("fixed hook target 0x%lx mismatch - falling back to pattern scan",
+            (unsigned long)FIXED_HOOK_TARGET);
+        g_hook_target = pattern_scan(&mi, SIG_HOOK_ADDR, sizeof(SIG_HOOK_ADDR));
+    }
+    LOG("resolve: onopenurl=0x%lx hook_target=0x%lx",
         (unsigned long)g_onopenurl_fn, (unsigned long)g_hook_target);
 
     if (g_onopenurl_fn)
         g_onurl_vt = find_vtable(&mi, g_onopenurl_fn);
+    if (!g_onurl_vt)
+        g_onurl_vt = FIXED_VTABLE;
     LOG("vtable=0x%lx", (unsigned long)g_onurl_vt);
 
     if (!g_onopenurl_fn || !g_hook_target || !g_onurl_vt)
-        LOG("WARNING: pattern scan incomplete - inject may not work (game updated?)");
+        LOG("WARNING: resolve incomplete - inject may not work (game updated?)");
 
     spawn_thread();
     return 0;

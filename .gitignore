@@ -2,6 +2,8 @@
 __pycache__/
 *.mfd
 badge.mfd
+sky_hook.so
+sky_hook.dll
 local.properties
 android/.gradle/
 android/build/

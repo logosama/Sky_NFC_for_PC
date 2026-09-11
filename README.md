@@ -21,7 +21,7 @@ falls back to the signatures in `patterns.json`.
 ├── config.json         # Configuration (NFC backend, timeouts)
 ├── patterns.json       # Signature library (fallback when fixed addresses break)
 ├── badge_inject.py     # Main tool (scan + inject, cross-platform)
-├── injector.py         # Windows DLL injector
+├── inject_dll.py       # Windows DLL injector
 ├── build.sh            # One-shot build for Linux .so + Windows .dll
 ├── hook/
 │   ├── common.c/h      # Shared core (trampoline/fixed addresses/TCP IPC/injection)
@@ -64,10 +64,10 @@ working without configuration.
 
 1. Cross-compile on Linux: `./build.sh` (produces sky_hook.dll)
    or build on Windows: `x86_64-w64-mingw32-gcc -shared -O2 -o sky_hook.dll hook/common.c hook/windows.c -lws2_32`
-2. After starting the game run: `python3 injector.py`
+2. After starting the game run: `python3 inject_dll.py`
 3. `python3 badge_inject.py` -> `s` -> place the badge
 
-The Windows path (DLL injection + injector.py) has not been verified on real
+The Windows path (DLL injection + inject_dll.py) has not been verified on real
 hardware yet.
 
 ## Supported NFC devices

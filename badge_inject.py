@@ -4,7 +4,7 @@ Scan NFC badge -> parse NDEF URL -> inject into game (game thread handles it wit
 
 Dependencies:
 - Linux:  libnfc (PN532/ACR122) or pcsclite (PC/SC readers)
-- Windows: winscard.dll (built-in) or injector + sky_hook.dll
+- Windows: winscard.dll (built-in) or inject_dll.py + sky_hook.dll
 """
 import os
 import socket
@@ -169,7 +169,7 @@ def main():
         print("WARN hook not connected. For Linux configure Steam launch options:")
         print(f"  LD_PRELOAD={os.path.join(PROJECT_ROOT, 'sky_hook.so')} %command%")
         if sys.platform == "win32":
-            print("  For Windows run: python3 injector.py")
+            print("  For Windows run: python3 inject_dll.py")
     print()
     if remote_mode:
         from nfc import remote

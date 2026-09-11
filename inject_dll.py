@@ -1,6 +1,6 @@
-"""injector.py - Windows DLL injector (ctypes calling kernel32, zero deps)
+"""inject_dll.py - Windows DLL injector (ctypes calling kernel32, zero deps)
 Flow: OpenProcess -> VirtualAllocEx -> WriteProcessMemory(DLL path) -> CreateRemoteThread(LoadLibraryA)
-Usage: python3 injector.py [process name] [DLL path]
+Usage: python3 inject_dll.py [process name] [DLL path]
 """
 import ctypes
 import ctypes.wintypes as wt

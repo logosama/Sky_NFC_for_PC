@@ -117,17 +117,30 @@ def inject_url(url, cfg):
 
     time.sleep(3)  # wait for game thread to trigger
     log_file = find_runtime_file("hook.log")
-    if log_file:
-        with open(log_file) as f:
-            log = f.read()
-        if "INJECT done" in log:
-            print("  [result] OK injection executed!")
-            for line in log.splitlines():
-                if "INJECT" in line:
-                    print(f"  [log] {line}")
-        else:
-            print("  [result] injection not executed")
-            print(f"  [log] {log_file}")
+    if not log_file:
+        return
+    # hook.log holds entries from every process that loaded the hook plus all
+    # earlier sessions, so anchor on the hook's echo of our own inject command
+    # and report only that segment. The URL cannot identify the injection: the
+    # hook logs just its first 60 chars, which differ only in the anti-replay
+    # counter at the end of the URL, and "INJECT done" carries no URL at all.
+    with open(log_file, errors="replace") as f:
+        lines = f.read().splitlines()
+    anchor = f"CMD:inject {url}"
+    start = next((i for i in range(len(lines) - 1, -1, -1) if anchor in lines[i]), None)
+    if start is None:                      # command never reached the hook
+        hits = []
+    else:                                  # stop at the next injection, if any
+        end = next((j for j in range(start + 1, len(lines)) if "CMD:inject " in lines[j]),
+                   len(lines))
+        hits = [l for l in lines[start + 1:end] if "INJECT" in l]
+    if any("INJECT done" in l for l in hits):
+        print("  [result] OK injection executed!")
+        for line in hits:
+            print(f"  [log] {line}")
+    else:
+        print("  [result] injection not executed")
+        print(f"  [log] {log_file}")
 
 
 def game_log_path():

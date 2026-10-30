@@ -12,14 +12,13 @@ NFC badge -> reader extracts NDEF URL -> TCP IPC -> hook in game process
 
 Function addresses are **fixed** for the current game build (0.34.5, build 410941),
 validated by magic bytes at startup. If a game update breaks them, a pattern scan
-falls back to the signatures in `patterns.json`.
+falls back to the signatures compiled into the hook (`SIG_*` in `hook/common.c`).
 
 ## Project structure
 
 ```
 ├── runtime.py          # Shared runtime-path logic (mirrors hook-side resolution)
 ├── config.json         # Configuration (NFC backend, timeouts)
-├── patterns.json       # Signature library (fallback when fixed addresses break)
 ├── badge_inject.py     # Main tool (scan + inject, cross-platform)
 ├── inject_dll.py       # Windows DLL injector
 ├── build.sh            # One-shot build for Linux .so + Windows .dll
@@ -163,7 +162,10 @@ adb logcat -s SkyBadgeRelay    # app log (read errors, POST failures)
   `pong main=1 hook=0 fn=0x1411221e0 vt=0x141e8a390 ticks=N`.
   `fn=0x0` means the game image was not fully mapped yet or the game updated;
   check `hook.log`.
-- **Logs**: `~/.config/sky-badge/hook.log` (or `SKY_BADGE_DIR/hook.log`).
+- **Logs**: `~/.config/sky-badge/hook.log` (or `SKY_BADGE_DIR/hook.log`); trimmed to its
+  newest half once it passes 256 KB (every process that loads the hook appends to it, so
+  it would otherwise grow across sessions). After a scan the tool prints just that
+  injection's entries, matched by URL.
 - **"NFC device busy"**: libnfc marks the serial port claimed via a termios bit
   that survives crashed readers. The libnfc backend clears it automatically and
   retries; if all else fails, replug the USB adapter.
@@ -177,8 +179,9 @@ Fixed addresses are in `hook/common.c` (`FIXED_ONOPENURL`, `FIXED_HOOK_TARGET`,
 
 1. Reverse-engineer the new addresses
 2. Update the `FIXED_*` constants and the `MAGIC_*` bytes
-3. Optionally update the signatures in `patterns.json` and `SIG_*` in
-   `hook/common.c` (used as fallback)
+3. Optionally update the signature fallbacks (`SIG_*` in `hook/common.c`); the exact
+   anchor bytes documented there are what disambiguate sibling functions - re-derive
+   them rather than loosening them to wildcards
 
 ## Disclaimer
 

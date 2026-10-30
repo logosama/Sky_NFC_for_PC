@@ -16,6 +16,7 @@
 void plat_log(const char *fmt, ...) {
     char path[512];
     badge_dir_path(path, sizeof(path), "hook.log");
+    log_trim_if_needed(path);
     FILE *f = fopen(path, "a");
     if (!f) return;
     setvbuf(f, NULL, _IONBF, 0);

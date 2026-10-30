@@ -11,6 +11,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <windows.h>
+#include <sys/stat.h>
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -67,15 +68,42 @@ void badge_dir_path(char *buf, size_t len, const char *subpath) {
 
 /* ============ Logging ============ */
 static FILE *g_logfp;
+static char g_log_path[512];
+
+/* Keep hook.log bounded. Every Wine/Proton child process inherits LD_PRELOAD and
+ * appends to the same file, so it never stops growing on its own. Past
+ * LOG_MAX_BYTES the oldest half is dropped, cutting at a line boundary to keep
+ * the newest entries readable. Writers must open the file append-mode (O_APPEND)
+ * so a rewrite behind a held stream cannot leave a sparse hole. */
+void log_trim_if_needed(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0 || st.st_size <= LOG_MAX_BYTES) return;
+    FILE *in = fopen(path, "rb");
+    if (!in) return;
+    if (fseek(in, (long)(st.st_size - LOG_KEEP_BYTES), SEEK_SET) != 0) { fclose(in); return; }
+    char *buf = malloc(LOG_KEEP_BYTES + 1);
+    if (!buf) { fclose(in); return; }
+    size_t n = fread(buf, 1, LOG_KEEP_BYTES, in);
+    fclose(in);
+    size_t off = 0;
+    while (off < n && buf[off] != '\n') off++;  /* drop the partial first line */
+    if (off < n) off++;
+    FILE *out = fopen(path, "wb");
+    if (out) {
+        fwrite(buf + off, 1, n - off, out);
+        fclose(out);
+    }
+    free(buf);
+}
 
 void common_log(const char *fmt, ...) {
     if (!g_logfp) {
-        char path[512];
-        badge_dir_path(path, sizeof(path), "hook.log");
-        g_logfp = fopen(path, "a");
+        badge_dir_path(g_log_path, sizeof(g_log_path), "hook.log");
+        g_logfp = fopen(g_log_path, "a");
         if (g_logfp) setvbuf(g_logfp, NULL, _IONBF, 0);
     }
     if (!g_logfp) return;
+    log_trim_if_needed(g_log_path);
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
 #ifdef _WIN32
@@ -107,12 +135,26 @@ static int      g_detour_len = 0;
 static int      g_hook_installed = 0;
 static char     g_inject_buf[4096];
 
-/* ============ Signature patterns (synced with patterns.json; 0xFF=wildcard) ============ */
+/* ============ Signature patterns (0xFF = wildcard; fallback when the FIXED_* magic check fails) ============
+ * The bytes kept exact in each signature are deliberate: dozens of sibling functions in this
+ * build share byte-identical prologues, and only these anchors tell them apart. If a game
+ * update forces a re-scan, re-derive the anchors rather than loosening them to wildcards.
+ */
+
+/* Message dispatcher. The first LEA displacement (5A 9B 6D 00, points to message name
+ * strings in .rdata) is kept exact to disambiguate from 35 siblings with identical prologues.
+ */
 static const uint8_t SIG_HOOK_ADDR[] = {
     0x55, 0x56, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8D, 0x6C, 0x24, 0x20,
     0x48, 0x89, 0xCE, 0x48, 0x8D, 0x15, 0x5A, 0x9B, 0x6D, 0x00, 0xE8,
     0xFF, 0xFF, 0xFF, 0xFF, 0x85, 0xC0, 0x0F, 0x84, 0xFF, 0xFF, 0xFF, 0xFF
 };
+/* Game::OnOpenedWithURL. Stack frame size (98 09 00 00 = 0x998) and class field offset
+ * (A0 11 00 00) are kept exact to disambiguate from 12 siblings with identical prologues.
+ *
+ * The host class vtable is not stored as a signature: find_vtable() derives it at runtime by
+ * scanning .rdata for entries referencing this function and walking backwards to the start.
+ */
 static const uint8_t SIG_ONOPENURL[] = {
     0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x56, 0x57, 0x53,
     0x48, 0x81, 0xEC, 0x98, 0x09, 0x00, 0x00, 0x48, 0x8D, 0xAC, 0x24, 0x80,

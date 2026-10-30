@@ -55,4 +55,13 @@ int  common_init(void);  /* resolve addresses + IPC start, returns 0 on success 
  * Linux: ~/.config/sky-badge/   Windows: %APPDATA%\sky-badge\ */
 void badge_dir_path(char *buf, size_t len, const char *subpath);
 
+/* ============ Log rotation ============ */
+/* hook.log is appended by every process that loads the hook (all Wine/Proton
+ * children inherit LD_PRELOAD), so it is trimmed to the newest LOG_KEEP_BYTES
+ * once it grows past LOG_MAX_BYTES. Implemented in common.c; platform loggers
+ * call it before appending. */
+#define LOG_MAX_BYTES  (256 * 1024)
+#define LOG_KEEP_BYTES (LOG_MAX_BYTES / 2)
+void log_trim_if_needed(const char *path);
+
 #endif /* SKY_HOOK_COMMON_H */

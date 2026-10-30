@@ -26,11 +26,16 @@ falls back to the signatures compiled into the hook (`SIG_*` in `hook/common.c`)
 │   ├── common.c/h      # Shared core (trampoline/fixed addresses/TCP IPC/injection)
 │   ├── linux.c         # Linux platform layer (LD_PRELOAD)
 │   └── windows.c       # Windows platform layer (DLL)
-└── nfc/
-    ├── __init__.py     # NFC backend abstraction + auto-selection
-    ├── libnfc_cli.py   # libnfc backend (PN532/ACR122)
-    ├── pcsc_ctypes.py  # PC/SC backend (USB readers, cross-platform)
-    └── remote.py       # Remote backend (receives dumps from the Android app)
+├── nfc/
+│   ├── __init__.py     # NFC backend abstraction + auto-selection
+│   ├── libnfc_cli.py   # libnfc backend (PN532/ACR122)
+│   ├── pcsc_ctypes.py  # PC/SC backend (USB readers, cross-platform)
+│   └── remote.py       # Remote backend (receives dumps from the Android app)
+├── tools/
+│   ├── verify_anchors.py   # Offline check of common.c anchors against Sky.exe
+│   └── ghidra/             # Headless Ghidra scripts for re-deriving anchors
+└── docs/
+    └── game-updates.md     # Playbook for game version updates
 ```
 
 `android/` is a separate Gradle project: the Sky Badge Relay app that turns a
@@ -175,13 +180,18 @@ adb logcat -s SkyBadgeRelay    # app log (read errors, POST failures)
 ## Handling game updates
 
 Fixed addresses are in `hook/common.c` (`FIXED_ONOPENURL`, `FIXED_HOOK_TARGET`,
-`FIXED_VTABLE`), each guarded by magic bytes (`MAGIC_*`). On a major update:
+`FIXED_VTABLE`), each guarded by magic bytes (`MAGIC_*`). A game update moves
+them, so the hook must be re-anchored. The full procedure is in
+[docs/game-updates.md](docs/game-updates.md); in short:
 
-1. Reverse-engineer the new addresses
-2. Update the `FIXED_*` constants and the `MAGIC_*` bytes
-3. Optionally update the signature fallbacks (`SIG_*` in `hook/common.c`); the exact
-   anchor bytes documented there are what disambiguate sibling functions - re-derive
-   them rather than loosening them to wildcards
+1. Confirm the new build in `Sky.log` (`Version: x.y.z.CL`).
+2. Re-derive the three addresses and their `MAGIC_*`/`SIG_*` guards with the
+   Ghidra helpers in `tools/ghidra/`. Keep the exact anchor bytes - do not loosen
+   signatures to wildcards just to make them match.
+3. Run `python3 tools/verify_anchors.py`; it must print `RESULT: ALL OK`
+   (magic bytes, unique signature hits, consistent vtable) before anything else.
+4. `./build.sh`, then verify in game: `ping` shows the new fn/vt, `hook` returns
+   `hook OK`, and a badge scan logs `INJECT done`.
 
 ## Disclaimer
 

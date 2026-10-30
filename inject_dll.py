@@ -7,14 +7,16 @@ import ctypes.wintypes as wt
 import os
 import sys
 
-PROCESS_ALL_ACCESS = 0x001F0FFF
+PROCESS_CREATE_THREAD = 0x0002
+PROCESS_VM_OPERATION = 0x0008
+PROCESS_VM_WRITE = 0x0020
+PROCESS_ACCESS = PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE
 MEM_COMMIT = 0x1000
 MEM_RESERVE = 0x2000
 PAGE_READWRITE = 0x04
 INFINITE = 0xFFFFFFFF
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 
 def _setup():
@@ -34,15 +36,10 @@ def _setup():
     kernel32.GetModuleHandleA.argtypes = [wt.LPCSTR]
     kernel32.GetProcAddress.restype = wt.LPVOID
     kernel32.GetProcAddress.argtypes = [wt.HMODULE, wt.LPCSTR]
-    user32.EnumWindows.restype = wt.BOOL
-    user32.EnumWindows.argtypes = [wt.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM), wt.LPARAM]
-    user32.GetWindowThreadProcessId.restype = wt.DWORD
-    user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
 
 
 def find_pid_by_name(proc_name):
     """Find PID by process name (system snapshot, no psutil dependency)"""
-    psapi = ctypes.WinDLL("psapi", use_last_error=True)
     # Toolhelp32 is more reliable
     kernel32.CreateToolhelp32Snapshot.restype = wt.HANDLE
     kernel32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
@@ -62,6 +59,9 @@ def find_pid_by_name(proc_name):
             ("dwFlags", wt.DWORD),
             ("szExeFile", ctypes.c_wchar * 260),
         ]
+
+    kernel32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
 
     TH32CS_SNAPPROCESS = 0x2
     snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -89,7 +89,7 @@ def inject(pid, dll_path):
         print(f"Error: DLL not found: {dll_path_abs}")
         return False
 
-    h_proc = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+    h_proc = kernel32.OpenProcess(PROCESS_ACCESS, False, pid)
     if not h_proc:
         print(f"Error: OpenProcess failed (code {ctypes.get_last_error()})")
         return False

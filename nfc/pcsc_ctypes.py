@@ -1,7 +1,9 @@
 """PC/SC ctypes backend - cross-platform USB reader support (zero Python deps)
 Linux: loads libpcsclite.so.1 (pcsclite system library)
 Windows: loads winscard.dll (built-in)
-Reads NTAG215 page by page via APDU (FF B0 00 <page> 04).
+Reads NTAG215 page by page with the ACR122-style FF B0 00 <page> 04
+pseudo-APDU. Generic CCID readers that only accept standard APDUs are not
+supported by this backend.
 """
 import ctypes
 import ctypes.util
@@ -13,10 +15,19 @@ SCARD_SCOPE_USER = 0
 SCARD_SHARE_SHARED = 2
 SCARD_PROTOCOL_T0 = 1
 SCARD_PROTOCOL_T1 = 2
-SCARD_PCI_T0 = None
 SCARD_E_NO_READERS_AVAILABLE = 0x8010002E
+SCARD_E_INSUFFICIENT_BUFFER = 0x80100008
 SCARD_E_NO_SMARTCARD = 0x8010000C
 SCARD_S_SUCCESS = 0
+
+
+class SCARD_IO_REQUEST(ctypes.Structure):
+    _fields_ = [("dwProtocol", ctypes.c_uint32),
+                ("cbPciLength", ctypes.c_uint32)]
+
+
+SCARD_PCI_T0 = SCARD_IO_REQUEST(SCARD_PROTOCOL_T0, ctypes.sizeof(SCARD_IO_REQUEST))
+SCARD_PCI_T1 = SCARD_IO_REQUEST(SCARD_PROTOCOL_T1, ctypes.sizeof(SCARD_IO_REQUEST))
 
 # NTAG215: 135 pages, 4 bytes each
 NTAG215_PAGES = 135
@@ -72,7 +83,7 @@ class PcscBackend:
         ]
         self._f_connect.restype = ctypes.c_long
         self._f_transmit.argtypes = [
-            ctypes.c_uint32, ctypes.c_void_p,
+            ctypes.c_uint32, ctypes.POINTER(SCARD_IO_REQUEST),
             ctypes.c_void_p, ctypes.c_uint32,
             ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32),
         ]
@@ -90,12 +101,14 @@ class PcscBackend:
             return False
         ctx = ctypes.c_uint32()
         if self._lib.SCardEstablishContext(
-                SCARD_SCOPE_USER, None, None, None, ctypes.byref(ctx)) != SCARD_S_SUCCESS:
+                SCARD_SCOPE_USER, None, None, ctypes.byref(ctx)) != SCARD_S_SUCCESS:
             return False
         n = ctypes.c_uint32()
         rc = self._f_list_readers(ctx, None, None, ctypes.byref(n))
         self._lib.SCardReleaseContext(ctx)
-        return rc == SCARD_S_SUCCESS and n.value > 0
+        # pcsc-lite returns success on the sizing call, Winscard may return
+        # SCARD_E_INSUFFICIENT_BUFFER; both mean n now holds the buffer size.
+        return rc in (SCARD_S_SUCCESS, SCARD_E_INSUFFICIENT_BUFFER) and n.value > 1
 
     def read_once(self):
         """Attempt one badge read, returns (uid, ndef_bytes) or None"""
@@ -103,7 +116,7 @@ class PcscBackend:
             return None
         ctx = ctypes.c_uint32()
         if self._lib.SCardEstablishContext(
-                SCARD_SCOPE_USER, None, None, None, ctypes.byref(ctx)) != SCARD_S_SUCCESS:
+                SCARD_SCOPE_USER, None, None, ctypes.byref(ctx)) != SCARD_S_SUCCESS:
             return None
         try:
             return self._read_with_ctx(ctx)
@@ -113,7 +126,7 @@ class PcscBackend:
     def _read_with_ctx(self, ctx):
         n = ctypes.c_uint32()
         rc = self._f_list_readers(ctx, None, None, ctypes.byref(n))
-        if rc != SCARD_S_SUCCESS:
+        if rc not in (SCARD_S_SUCCESS, SCARD_E_INSUFFICIENT_BUFFER) or n.value < 2:
             return None
         buf = ctypes.create_string_buffer(n.value)
         rc = self._f_list_readers(ctx, None, buf, ctypes.byref(n))
@@ -129,6 +142,10 @@ class PcscBackend:
                 ctypes.byref(card), ctypes.byref(proto)) != SCARD_S_SUCCESS:
             return None
 
+        # SCardTransmit requires a valid SCARD_IO_REQUEST (Winscard rejects
+        # NULL); select the one matching the negotiated protocol.
+        pci = SCARD_PCI_T1 if proto.value == SCARD_PROTOCOL_T1 else SCARD_PCI_T0
+
         try:
             data = bytearray()
             for page in range(NTAG215_PAGES):
@@ -136,7 +153,7 @@ class PcscBackend:
                 resp = (ctypes.c_ubyte * 260)()
                 resp_len = ctypes.c_uint32(len(resp))
                 r = self._f_transmit(
-                    card, None, apdu, len(apdu), None,
+                    card, ctypes.byref(pci), apdu, len(apdu), None,
                     resp, ctypes.byref(resp_len))
                 if r != SCARD_S_SUCCESS:
                     return None

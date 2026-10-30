@@ -8,6 +8,15 @@ This document is the procedure used for 0.35.1 (CL 423272) and the reference for
 future builds. The current values live in `hook/common.c`; do not trust the
 values quoted here after a new update.
 
+`Sky.exe` is the same Windows PE that Proton runs on Linux, so the anchors and
+the verification workflow are host-OS independent; a native Windows install can
+run the same Ghidra scripts (`analyzeHeadless.bat`) and
+`python3 tools/verify_anchors.py`.
+
+For accumulated per-build findings, the post-update checklist, and the entry
+template, see
+[game-update-experience.md](game-update-experience.md).
+
 ## Symptoms
 
 - `python3 badge_inject.py` reports `fn=0x0` and `hook` returns `hook FAIL`.

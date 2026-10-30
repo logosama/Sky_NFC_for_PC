@@ -109,6 +109,41 @@ int plat_is_main_process(void) {
     return 0;
 }
 
+/* ============ Host instance scan (/proc/self/maps) ============ */
+/* Find a live object whose first qword is the host vtable. Objects are found
+ * by scanning memory by value, so this works across process restarts. */
+uint64_t plat_find_instance(uint64_t vtable) {
+    if (!vtable) return 0;
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    uint64_t found = 0;
+    char l[512];
+    while (!found && fgets(l, sizeof(l), f)) {
+        uint64_t s, e; char p[8];
+        if (sscanf(l, "%lx-%lx %7s", &s, &e, p) != 3) continue;
+        if (!strchr(p, 'r')) continue;
+        if (e - s < 0x1000 || e - s > 300 * 1024 * 1024) continue;
+        uint64_t cs = 4 * 1024 * 1024;
+        uint8_t *buf = malloc(cs);
+        if (!buf) continue;
+        for (uint64_t o = 0; o < e - s && !found; o += cs) {
+            uint64_t rs = (o + cs > e - s) ? (e - s - o) : cs;
+            if (plat_read_mem(s + o, buf, rs) != 0) break;
+            for (uint64_t i = 0; i + 8 <= rs && !found; i += 8) {
+                uint64_t obj;
+                memcpy(&obj, buf + i, 8);
+                if (obj < 0x100000 || obj > 0x7fffffffffffULL) continue;
+                uint64_t vt;
+                if (plat_read_mem(obj, &vt, sizeof(vt)) != 0) continue;
+                if (vt == vtable) found = obj;
+            }
+        }
+        free(buf);
+    }
+    fclose(f);
+    return found;
+}
+
 /* ============ Entry point (LD_PRELOAD constructor) ============ */
 /* Under Proton, the .so is loaded into the wine process BEFORE Sky.exe's
  * PE image is mapped, so a constructor-time check would always fail.

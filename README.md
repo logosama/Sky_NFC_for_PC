@@ -35,7 +35,8 @@ falls back to the signatures compiled into the hook (`SIG_*` in `hook/common.c`)
 │   ├── verify_anchors.py   # Offline check of common.c anchors against Sky.exe
 │   └── ghidra/             # Headless Ghidra scripts for re-deriving anchors
 └── docs/
-    └── game-updates.md     # Playbook for game version updates
+    ├── game-updates.md            # Playbook for game version updates
+    └── game-update-experience.md  # Per-build experience log and checklist
 ```
 
 `android/` is a separate Gradle project: the Sky Badge Relay app that turns a
@@ -64,23 +65,32 @@ working without configuration.
 3. Launch the game, log in, then run: `python3 badge_inject.py`
 4. Enter `s` and place the badge on the reader
 
-## Usage (Windows, untested)
+## Usage (Windows, verified)
 
 1. Cross-compile on Linux: `./build.sh` (produces sky_hook.dll)
    or build on Windows: `x86_64-w64-mingw32-gcc -shared -O2 -o sky_hook.dll hook/common.c hook/windows.c -lws2_32`
-2. After starting the game run: `python3 inject_dll.py`
+2. After starting the game run (64-bit Python; use an elevated shell if the
+   game runs elevated): `python3 inject_dll.py`
 3. `python3 badge_inject.py` -> `s` -> place the badge
 
-The Windows path (DLL injection + inject_dll.py) has not been verified on real
-hardware yet.
+The Windows path is implemented and was verified on native Windows against Sky
+0.35.1 (CL 423272): `ping` -> `hook OK` -> badge scan -> `INJECT done`,
+including in-process instance discovery (`VirtualQuery`) and writable trampoline
+pages. The same path is covered by a synthetic end-to-end Wine smoke test,
+including the unmapped-anchor fallback. The most reliable reader path on
+Windows is the phone relay (`python3 badge_inject.py --remote`), since the
+PC/SC backend only supports ACR122-style readers.
 
 ## Supported NFC devices
 
 | Backend | Devices | Platform |
 |---------|---------|----------|
 | libnfc | PN532 (UART/SPI), ACR122U and more | Linux |
-| PC/SC | Any CCID/PCSC reader | Linux + Windows |
+| PC/SC | Readers supporting the ACR122-style `FF B0` read pseudo-APDU | Linux + Windows |
 | remote | Android phone via Sky Badge Relay app | LAN (Linux + Windows) |
+
+The PC/SC backend reads NTAG215 pages with the ACR122-style `FF B0` pseudo-APDU;
+generic CCID readers that only accept standard APDUs are not supported.
 
 Auto-detected by default (fix via `nfc.backend` in config.json: `auto`/`libnfc`/`pcsc`).
 
@@ -182,7 +192,9 @@ adb logcat -s SkyBadgeRelay    # app log (read errors, POST failures)
 Fixed addresses are in `hook/common.c` (`FIXED_ONOPENURL`, `FIXED_HOOK_TARGET`,
 `FIXED_VTABLE`), each guarded by magic bytes (`MAGIC_*`). A game update moves
 them, so the hook must be re-anchored. The full procedure is in
-[docs/game-updates.md](docs/game-updates.md); in short:
+[docs/game-updates.md](docs/game-updates.md); accumulated per-build findings,
+the post-update checklist, and the entry template are in
+[docs/game-update-experience.md](docs/game-update-experience.md). In short:
 
 1. Confirm the new build in `Sky.log` (`Version: x.y.z.CL`).
 2. Re-derive the three addresses and their `MAGIC_*`/`SIG_*` guards with the

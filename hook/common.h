@@ -25,6 +25,10 @@ int  plat_get_module(module_info_t *mi);            /* Sky.exe module info */
 int  plat_is_main_process(void);
 void plat_log(const char *fmt, ...);                /* platform logging */
 
+/* Find a live object whose first qword equals `vtable` by scanning readable
+ * process memory. Returns the object address, or 0 if not found. */
+uint64_t plat_find_instance(uint64_t vtable);
+
 /* ============ Pattern scan ============ */
 /* wildcard 0xFF matches any byte */
 uint64_t pattern_scan(const module_info_t *mi, const uint8_t *sig, size_t sig_len);

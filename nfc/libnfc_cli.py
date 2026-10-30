@@ -1,9 +1,11 @@
 """libnfc CLI backend - reads badges via nfc-mfultralight CLI tool
 Supports all libnfc device drivers (pn532_uart, acr122_usb, acr122_pcsc, etc.)
+Linux only: the libnfc CLI tools are not available on Windows.
 """
 import glob
 import os
 import subprocess
+import sys
 
 from nfc import badge_dump_path
 
@@ -13,6 +15,8 @@ def clear_stuck_claim():
     in termios c_iflag. A killed or crashed nfc tool leaves the bit set, which
     makes every later open fail with 'Serial port already claimed' until the
     adapter is replugged. Clear the stale bit on all serial devices."""
+    if sys.platform != "linux":
+        return False
     cleared = False
     for dev in glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"):
         try:
@@ -33,10 +37,17 @@ def clear_stuck_claim():
 
 def _run_cli(args, timeout=5):
     """Run a libnfc CLI tool; kill it on timeout (a lingering reader keeps
-    the port claimed) and clear any stale claim bit."""
-    proc = subprocess.Popen(
-        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
+    the port claimed) and clear any stale claim bit. Missing tools (Windows,
+    or a Linux install without libnfc) are reported as empty output so the
+    auto-detection can fall through to the next backend."""
+    if sys.platform == "win32":
+        return ""
+    try:
+        proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+    except OSError:
+        return ""
     try:
         out, err = proc.communicate(timeout=timeout)
         return out + err
@@ -52,6 +63,8 @@ class LibnfcBackend:
 
     def available(self):
         """Check if libnfc CLI tools are available"""
+        if sys.platform == "win32":
+            return False
         out = _run_cli(["nfc-list"], timeout=8)
         if "claimed" in out:
             clear_stuck_claim()

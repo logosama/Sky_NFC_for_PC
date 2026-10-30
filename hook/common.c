@@ -350,7 +350,13 @@ int hook_install(uint64_t target) {
         LOG("read fail"); return 0;
     }
 
-    /* Fill trampoline replay area (NOP first, then original bytes) */
+    /* Fill trampoline replay area (NOP first, then original bytes). The
+     * trampoline lives in our own read-only .text: Linux lets us write it
+     * through /proc/self/mem, but on Windows the image section must be made
+     * writable first or the memcpy faults. */
+    if (plat_protect_rwx((uint64_t)(uintptr_t)&_sky_tramp_orig, 64) != 0) {
+        LOG("tramp protect fail"); return 0;
+    }
     static const uint8_t nops[20] = {[0 ... 19] = 0x90};
     plat_write_mem((uint64_t)(uintptr_t)&_sky_tramp_orig, nops, 20);
     if (plat_write_mem((uint64_t)(uintptr_t)&_sky_tramp_orig, g_orig_bytes, g_detour_len) != 0) {
@@ -376,7 +382,7 @@ int hook_install(uint64_t target) {
     }
 
     g_hook_installed = 1;
-    LOG("HOOK installed at 0x%lx", target);
+    LOG("HOOK installed at 0x%llx", (unsigned long long)target);
     return 1;
 }
 
@@ -401,44 +407,18 @@ void do_inject(void) {
 
     uint64_t th = g_onurl_this;
     if (!th && g_onurl_vt) {
-        /* Auto-scan for vtable instance */
-        module_info_t mi;
-        if (plat_get_module(&mi) == 0) {
-            char maps[512];
-            /* Scan all readable memory regions for vtable instance (platform layer provides simplified scan) */
-            /* Simplified: full scan only on Linux; Windows uses process memory APIs */
-#ifndef _WIN32
-            FILE *f = fopen("/proc/self/maps", "r");
-            if (f) {
-                char l[512];
-                while (fgets(l, sizeof(l), f)) {
-                    uint64_t s, e; char p[8];
-                    if (sscanf(l, "%lx-%lx %7s", &s, &e, p) != 3) continue;
-                    if (!strchr(p, 'r')) continue;
-                    if (e - s < 0x1000 || e - s > 300 * 1024 * 1024) continue;
-                    uint64_t cs = 4 * 1024 * 1024; uint8_t *buf = malloc(cs); if (!buf) continue;
-                    for (uint64_t o = 0; o < e - s && !th; o += cs) {
-                        uint64_t rs = (o + cs > e - s) ? (e - s - o) : cs;
-                        if (plat_read_mem(s + o, buf, rs)) break;
-                        for (uint64_t i = 0; i + 8 <= rs && !th; i += 8) {
-                            uint64_t obj; memcpy(&obj, buf + i, 8);
-                            if (obj < 0x100000 || obj > 0x7fffffffffffULL) continue;
-                            uint64_t vt; if (plat_read_mem(obj, &vt, 8) != 0) continue;
-                            if (vt == g_onurl_vt) { th = obj; g_onurl_this = obj; break; }
-                        }
-                    }
-                    free(buf);
-                }
-                fclose(f);
-            }
-#endif
+        /* Auto-scan readable process memory for a live object whose vptr is
+         * the host vtable. The scan is platform-specific (see plat_find_instance). */
+        th = plat_find_instance(g_onurl_vt);
+        if (th) {
+            g_onurl_this = th;
+            LOG("INJECT: auto-found this=0x%llx", (unsigned long long)th);
         }
-        if (!th) { LOG("INJECT: no instance"); return; }
-        LOG("INJECT: auto-found this=0x%lx", th);
     }
+    if (!th) { LOG("INJECT: no instance"); return; }
 
     if (!g_onopenurl_fn) { LOG("INJECT: no fn addr"); return; }
-    LOG("INJECT: this=0x%lx url=%.60s", th, url);
+    LOG("INJECT: this=0x%llx url=%.60s", (unsigned long long)th, url);
 
     register uint64_t r1 __asm__("rcx") = th;
     register uint64_t r2 __asm__("rdx") = (uint64_t)url;
@@ -540,6 +520,7 @@ static void ipc_handle(int cl) {
 }
 
 static void *ipc_thread(void *arg) {
+    (void)arg;
     uint16_t port = 0;
     if (ipc_start(&port) != 0) return NULL;
     while (1) {
@@ -552,8 +533,13 @@ static void *ipc_thread(void *arg) {
 
 /* ============ Threading (cross-platform) ============ */
 #ifdef _WIN32
+static DWORD WINAPI ipc_thread_entry(LPVOID arg) {
+    (void)arg;
+    ipc_thread(NULL);
+    return 0;
+}
 static int spawn_thread(void) {
-    HANDLE h = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)ipc_thread, NULL, 0, NULL);
+    HANDLE h = CreateThread(NULL, 0, ipc_thread_entry, NULL, 0, NULL);
     if (h) { CloseHandle(h); return 0; }
     return -1;
 }
@@ -605,31 +591,32 @@ int common_init(void) {
         LOG("no Sky.exe module");
         return -1;
     }
-    LOG("module base=0x%lx text=0x%lx+0x%lx rdata=0x%lx+0x%lx",
-        (unsigned long)mi.base, (unsigned long)mi.text_start, (unsigned long)mi.text_size,
-        (unsigned long)mi.rdata_start, (unsigned long)mi.rdata_size);
+    LOG("module base=0x%llx text=0x%llx+0x%llx rdata=0x%llx+0x%llx",
+        (unsigned long long)mi.base, (unsigned long long)mi.text_start,
+        (unsigned long long)mi.text_size, (unsigned long long)mi.rdata_start,
+        (unsigned long long)mi.rdata_size);
 
     /* Fixed addresses first (fast and reliable), pattern scan as fallback */
     g_onopenurl_fn = FIXED_ONOPENURL;
     if (!mem_matches(FIXED_ONOPENURL, MAGIC_ONOPENURL, sizeof(MAGIC_ONOPENURL))) {
-        LOG("fixed onopenurl 0x%lx mismatch - falling back to pattern scan",
-            (unsigned long)FIXED_ONOPENURL);
+        LOG("fixed onopenurl 0x%llx mismatch - falling back to pattern scan",
+            (unsigned long long)FIXED_ONOPENURL);
         g_onopenurl_fn = pattern_scan(&mi, SIG_ONOPENURL, sizeof(SIG_ONOPENURL));
     }
     g_hook_target = FIXED_HOOK_TARGET;
     if (!mem_matches(FIXED_HOOK_TARGET, MAGIC_HOOK_TARGET, sizeof(MAGIC_HOOK_TARGET))) {
-        LOG("fixed hook target 0x%lx mismatch - falling back to pattern scan",
-            (unsigned long)FIXED_HOOK_TARGET);
+        LOG("fixed hook target 0x%llx mismatch - falling back to pattern scan",
+            (unsigned long long)FIXED_HOOK_TARGET);
         g_hook_target = pattern_scan(&mi, SIG_HOOK_ADDR, sizeof(SIG_HOOK_ADDR));
     }
-    LOG("resolve: onopenurl=0x%lx hook_target=0x%lx",
-        (unsigned long)g_onopenurl_fn, (unsigned long)g_hook_target);
+    LOG("resolve: onopenurl=0x%llx hook_target=0x%llx",
+        (unsigned long long)g_onopenurl_fn, (unsigned long long)g_hook_target);
 
     if (g_onopenurl_fn)
         g_onurl_vt = find_vtable(&mi, g_onopenurl_fn);
     if (!g_onurl_vt && vtable_ptr_in_text(&mi, FIXED_VTABLE))
         g_onurl_vt = FIXED_VTABLE;
-    LOG("vtable=0x%lx", (unsigned long)g_onurl_vt);
+    LOG("vtable=0x%llx", (unsigned long long)g_onurl_vt);
 
     if (!g_onopenurl_fn || !g_hook_target || !g_onurl_vt)
         LOG("WARNING: resolve incomplete - inject may not work (game updated?)");

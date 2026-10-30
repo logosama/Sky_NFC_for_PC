@@ -10,7 +10,7 @@ NFC badge -> reader extracts NDEF URL -> TCP IPC -> hook in game process
           -> game main thread calls its own OnOpenedWithURL -> server verification -> badge effect
 ```
 
-Function addresses are **fixed** for the current game build (0.34.5, build 410941),
+Function addresses are **fixed** for the current game build (0.35.1, build 423272),
 validated by magic bytes at startup. If a game update breaks them, a pattern scan
 falls back to the signatures compiled into the hook (`SIG_*` in `hook/common.c`).
 
@@ -159,7 +159,7 @@ adb logcat -s SkyBadgeRelay    # app log (read errors, POST failures)
 ## Troubleshooting
 
 - **Hook status**: run `python3 badge_inject.py` - the startup line shows
-  `pong main=1 hook=0 fn=0x1411221e0 vt=0x141e8a390 ticks=N`.
+  `pong main=1 hook=0 fn=0x141172670 vt=0x141f0ed80 ticks=N`.
   `fn=0x0` means the game image was not fully mapped yet or the game updated;
   check `hook.log`.
 - **Logs**: `~/.config/sky-badge/hook.log` (or `SKY_BADGE_DIR/hook.log`); trimmed to its

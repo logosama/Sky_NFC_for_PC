@@ -141,25 +141,27 @@ static char     g_inject_buf[4096];
  * update forces a re-scan, re-derive the anchors rather than loosening them to wildcards.
  */
 
-/* Message dispatcher. The first LEA displacement (5A 9B 6D 00, points to message name
- * strings in .rdata) is kept exact to disambiguate from 35 siblings with identical prologues.
+/* AnalyticsEvent name -> id mapper (the hook's game-thread tick source). The first LEA
+ * displacement (95 FD 6E 00, pointing at the "null" sentinel) is kept exact to disambiguate
+ * it from the other functions sharing this prologue.
  */
 static const uint8_t SIG_HOOK_ADDR[] = {
     0x55, 0x56, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8D, 0x6C, 0x24, 0x20,
-    0x48, 0x89, 0xCE, 0x48, 0x8D, 0x15, 0x5A, 0x9B, 0x6D, 0x00, 0xE8,
+    0x48, 0x89, 0xCE, 0x48, 0x8D, 0x15, 0x95, 0xFD, 0x6E, 0x00, 0xE8,
     0xFF, 0xFF, 0xFF, 0xFF, 0x85, 0xC0, 0x0F, 0x84, 0xFF, 0xFF, 0xFF, 0xFF
 };
-/* Game::OnOpenedWithURL. Stack frame size (98 09 00 00 = 0x998) and class field offset
- * (A0 11 00 00) are kept exact to disambiguate from 12 siblings with identical prologues.
+/* Game::OnOpenedWithURL. The full 49-byte sequence is unique in .text for this build; the
+ * stack frame size (0F 18 00 00 = 0x0F18) and class field offset (B8 11 00 00 = 0x11B8)
+ * changed from the previous build and are part of the anchor.
  *
  * The host class vtable is not stored as a signature: find_vtable() derives it at runtime by
  * scanning .rdata for entries referencing this function and walking backwards to the start.
  */
 static const uint8_t SIG_ONOPENURL[] = {
     0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x56, 0x57, 0x53,
-    0x48, 0x81, 0xEC, 0x98, 0x09, 0x00, 0x00, 0x48, 0x8D, 0xAC, 0x24, 0x80,
+    0x48, 0x81, 0xEC, 0x18, 0x0F, 0x00, 0x00, 0x48, 0x8D, 0xAC, 0x24, 0x80,
     0x00, 0x00, 0x00, 0x44, 0x89, 0xC3, 0x48, 0x89, 0xD7, 0x48, 0x89, 0xCE,
-    0x4C, 0x8D, 0xB1, 0xA0, 0x11, 0x00, 0x00, 0x48, 0x89, 0xD1, 0x4C, 0x89, 0xF2
+    0x4C, 0x8D, 0xB1, 0xB8, 0x11, 0x00, 0x00, 0x48, 0x89, 0xD1, 0x4C, 0x89, 0xF2
 };
 
 /* ============ Pattern scan ============ */
@@ -505,8 +507,10 @@ static void ipc_handle(int cl) {
 
     char r[512] = {0};
     if (!strcmp(b, "ping"))
-        snprintf(r, sizeof(r), "pong main=%d hook=%d fn=0x%lx vt=0x%lx ticks=%ld",
-                 plat_is_main_process(), g_hook_installed, g_onopenurl_fn, g_onurl_vt, g_tick_count);
+        snprintf(r, sizeof(r), "pong main=%d hook=%d fn=0x%llx vt=0x%llx ticks=%ld",
+                 plat_is_main_process(), g_hook_installed,
+                 (unsigned long long)g_onopenurl_fn, (unsigned long long)g_onurl_vt,
+                 g_tick_count);
     else if (!strcmp(b, "hook")) {
         hook_install(g_hook_target);
         snprintf(r, sizeof(r), g_hook_installed ? "hook OK" : "hook FAIL");
@@ -563,16 +567,16 @@ static int spawn_thread(void) {
 #endif
 
 /* ============ Initialization (called by platform layer) ============ */
-/* Known-good addresses for game build 0.34.5 (build 410941). Fixed addresses
+/* Known-good addresses for game build 0.35.1 (CL 423272). Fixed addresses
  * are used as primary resolution per project decision; if the bytes at those
  * addresses no longer match (game update), fall back to pattern scan. */
-#define FIXED_ONOPENURL   0x1411221e0ULL
-#define FIXED_HOOK_TARGET 0x1418b0b10ULL
-#define FIXED_VTABLE      0x141e8a390ULL
+#define FIXED_ONOPENURL   0x141172670ULL
+#define FIXED_HOOK_TARGET 0x141925c10ULL
+#define FIXED_VTABLE      0x141f0ed80ULL
 
 static const uint8_t MAGIC_ONOPENURL[] = {
     0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x56, 0x57, 0x53,
-    0x48, 0x81, 0xEC, 0x98, 0x09, 0x00, 0x00
+    0x48, 0x81, 0xEC, 0x18, 0x0F, 0x00, 0x00
 };
 static const uint8_t MAGIC_HOOK_TARGET[] = {
     0x55, 0x56, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8D, 0x6C, 0x24, 0x20,
@@ -583,6 +587,14 @@ static int mem_matches(uint64_t addr, const uint8_t *magic, size_t len) {
     uint8_t buf[32];
     if (len > sizeof(buf) || plat_read_mem(addr, buf, len) != 0) return 0;
     return memcmp(buf, magic, len) == 0;
+}
+
+/* A vtable's first entry must point into .text. This rejects a stale FIXED_VTABLE
+ * instead of reporting an address that cannot be a class vptr. */
+static int vtable_ptr_in_text(const module_info_t *mi, uint64_t vt) {
+    uint64_t first = 0;
+    if (!vt || plat_read_mem(vt, &first, sizeof(first)) != 0) return 0;
+    return first >= mi->text_start && first < mi->text_start + mi->text_size;
 }
 
 int common_init(void) {
@@ -615,7 +627,7 @@ int common_init(void) {
 
     if (g_onopenurl_fn)
         g_onurl_vt = find_vtable(&mi, g_onopenurl_fn);
-    if (!g_onurl_vt)
+    if (!g_onurl_vt && vtable_ptr_in_text(&mi, FIXED_VTABLE))
         g_onurl_vt = FIXED_VTABLE;
     LOG("vtable=0x%lx", (unsigned long)g_onurl_vt);
 

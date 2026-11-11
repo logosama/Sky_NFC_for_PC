@@ -19,6 +19,7 @@ Maintenance rules:
 |---|---|---|---|---|
 | 0.34.5 | 410941 | Linux (historical) | baseline for the 0.35.1 update | `player_shout` still present |
 | 0.35.1 | 423272 | Linux in-game; native Windows (2026-10-31) | all three addresses, frame/field offsets | three shout event names replaced `player_shout`; Windows path verified |
+| 0.35.2 | 426499 | Linux in-game (2026-11-11) | OnOpenedWithURL +0x10, hook target +0x270, vtable unchanged | `SIG_HOOK_ADDR` LEA displacement changed (new `"null"` string) |
 
 ## Post-update checklist
 
@@ -33,7 +34,7 @@ Run this for every build; record the results in the new version entry.
 | `hook/common.c` | Update all `FIXED_*`, `MAGIC_*`, `SIG_*`; keep exact anchor bytes; update the build comment | no wildcard loosening |
 | Offline check | `python3 tools/verify_anchors.py --exe <Sky.exe>` | `RESULT: ALL OK` (magic, one signature hit, vtable) |
 | Build | `./build.sh` | `sky_hook.so` + `sky_hook.dll` |
-| Linux in-game | `ping`, `hook`, badge scan | `fn`/`vt` non-zero, `hook OK`, ticks increase, `INJECT done` |
+| Linux in-game | `ping`, badge scan (hook auto-installs) | `fn`/`vt` non-zero, ticks increase, `INJECT done` |
 | Windows in-game | `verify_anchors.py` on the Windows `Sky.exe`, then `inject_dll.py`, `ping`/`hook`/scan | same as Linux; check `%APPDATA%\sky-badge\hook.log` for full 64-bit addresses |
 | Docs | Update the `ping` example, Windows status, and this log | — |
 | Phone relay | Android app protocol + `nfc/remote.py` | usually unchanged; verify only if the URL format changed |
@@ -161,6 +162,60 @@ version-independent and should be re-checked after every update:
 - Wine synthetic `Sky.exe`: `ping -> hook OK -> inject -> INJECT done ->
   unhook`, plus the unmapped-anchor path (`fn=0x0`, `hook FAIL`, process
   stays alive).
+
+## 0.35.2 (426499)
+
+Linux verification date: 2026-11-11.
+
+### Anchor delta
+
+| Anchor | 0.35.1 (423272) | 0.35.2 (426499) |
+|---|---|---|
+| `FIXED_ONOPENURL` | `0x141172670` | `0x141172680` |
+| `FIXED_HOOK_TARGET` | `0x141925c10` | `0x141925e80` |
+| `FIXED_VTABLE` | `0x141f0ed80` | `0x141f0ed80` |
+| OnOpenedWithURL frame / field | `0x0F18` / `+0x11B8` | `0x0F18` / `+0x11B8` |
+| First `je` in mapper | `0x1B9E` | `0x1B9E` |
+
+Anchor lengths for this build: `MAGIC_ONOPENURL` 19 bytes,
+`SIG_ONOPENURL` 49 bytes, `MAGIC_HOOK_TARGET` 17 bytes,
+`SIG_HOOK_ADDR` 34 bytes.
+
+### What changed in the binary
+
+- `OnOpenedWithURL` moved by `+0x10`; its prologue remains unique and its
+  frame/field offsets are unchanged.
+- The AnalyticsEvent mapper moved by `+0x270`. Its `"null"` sentinel string
+  moved to `0x1420159BA`, so only the first LEA displacement in
+  `SIG_HOOK_ADDR` changed: `95 FD 6E 00` -> `25 FB 6E 00`. The prologue,
+  first `je` offset (`0x1B9E`) and event list shape are unchanged. The mapper
+  still starts with `null`, `app_open`, `level_loaded`, `level_completed`.
+- The vtable is unchanged; `.rdata` at `0x141f0ee00` points at the new
+  `OnOpenedWithURL`, and walking back gives table start `0x141f0ed80`.
+
+### Verification
+
+- `python3 tools/verify_anchors.py`: `RESULT: ALL OK` against 0.35.2
+  (`Sky.exe` 44,896,472 bytes, `ImageBase = 0x140000000`).
+- Linux in-game (2026-11-11): after fixing the Steam `LD_PRELOAD` path,
+  `ping` shows `fn=0x141172680 vt=0x141f0ed80`, `hook` returns `hook OK`,
+  and an IPC `inject` of the last scanned badge URL logs `INJECT done` while
+  `ticks` increases. The phone `--remote` receiver path is unchanged; a fresh
+  physical scan is still the final in-game check.
+- Windows in-game: not re-verified for this build (no Windows host); anchors
+  are host-independent, but run `verify_anchors.py` against the Windows
+  `Sky.exe` before relying on them.
+
+### Pitfalls
+
+- The only signature byte change is the first LEA displacement in
+  `SIG_HOOK_ADDR`; do not loosen the signature to wildcards. The `"null"`
+  sentinel address is the discriminator among dozens of identical prologues.
+- `FIXED_ONOPENURL` and `FIXED_HOOK_TARGET` moved independently; both magic
+  checks must pass before building.
+- Update the Steam launch options after moving the project directory; an
+  `LD_PRELOAD` path that no longer exists fails silently and leaves a stale
+  `ipc_port`, which surfaces as `Connection refused`.
 
 ## Known failure modes
 

@@ -189,11 +189,11 @@ LD_PRELOAD=/path/to/sky_hook.so %command%
 
 After logging in:
 
-1. `python3 badge_inject.py` - the startup line must show
-   `main=1 hook=0 fn=<new address> vt=<new vtable> ticks=N`;
-2. enter `h` (or `hook`) - expect `hook OK`;
-3. scan a badge - the log must contain `INJECT done`, and `ticks` must keep
-   increasing between pings.
+1. `python3 badge_inject.py` (or `--reader`/`--remote`) - the tool waits for
+   the hook and prints
+   `OK hook connected (pong main=1 hook=0 fn=<new address> vt=<new vtable> ticks=N)`;
+2. scan a badge - the hook is installed automatically on the first injection;
+   the log must contain `INJECT done`, and `ticks` must keep increasing.
 
 ## 6. When it goes wrong
 

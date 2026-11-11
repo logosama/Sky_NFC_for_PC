@@ -142,12 +142,12 @@ static char     g_inject_buf[4096];
  */
 
 /* AnalyticsEvent name -> id mapper (the hook's game-thread tick source). The first LEA
- * displacement (95 FD 6E 00, pointing at the "null" sentinel) is kept exact to disambiguate
+ * displacement (25 FB 6E 00, pointing at the "null" sentinel) is kept exact to disambiguate
  * it from the other functions sharing this prologue.
  */
 static const uint8_t SIG_HOOK_ADDR[] = {
     0x55, 0x56, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8D, 0x6C, 0x24, 0x20,
-    0x48, 0x89, 0xCE, 0x48, 0x8D, 0x15, 0x95, 0xFD, 0x6E, 0x00, 0xE8,
+    0x48, 0x89, 0xCE, 0x48, 0x8D, 0x15, 0x25, 0xFB, 0x6E, 0x00, 0xE8,
     0xFF, 0xFF, 0xFF, 0xFF, 0x85, 0xC0, 0x0F, 0x84, 0xFF, 0xFF, 0xFF, 0xFF
 };
 /* Game::OnOpenedWithURL. The full 49-byte sequence is unique in .text for this build; the
@@ -553,11 +553,11 @@ static int spawn_thread(void) {
 #endif
 
 /* ============ Initialization (called by platform layer) ============ */
-/* Known-good addresses for game build 0.35.1 (CL 423272). Fixed addresses
+/* Known-good addresses for game build 0.35.2 (CL 426499). Fixed addresses
  * are used as primary resolution per project decision; if the bytes at those
  * addresses no longer match (game update), fall back to pattern scan. */
-#define FIXED_ONOPENURL   0x141172670ULL
-#define FIXED_HOOK_TARGET 0x141925c10ULL
+#define FIXED_ONOPENURL   0x141172680ULL
+#define FIXED_HOOK_TARGET 0x141925e80ULL
 #define FIXED_VTABLE      0x141f0ed80ULL
 
 static const uint8_t MAGIC_ONOPENURL[] = {

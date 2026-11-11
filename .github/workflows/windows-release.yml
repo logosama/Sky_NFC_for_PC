@@ -141,11 +141,14 @@ jobs:
           assert z.testzip() is None
           print(len(names), 'entries OK')
           PY
+      - name: Stage Windows artifacts
+        shell: bash
+        run: cp dist/onefile/SkyBadgeInject.exe SkyBadgeInject.exe
       - uses: actions/upload-artifact@v4
         with:
           name: skybadge-windows
           path: |
-            dist/onefile/SkyBadgeInject.exe
+            SkyBadgeInject.exe
             SkyBadgeInject-onedir.zip
           if-no-files-found: error
           retention-days: 7

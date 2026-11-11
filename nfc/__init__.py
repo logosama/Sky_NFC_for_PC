@@ -1,6 +1,6 @@
 """nfc - NFC badge reading backend abstraction
 Unified interface: read_badge(timeout) -> (uid, ndef_bytes) or None
-Backend selection: config.json nfc.backend (auto|libnfc|pcsc)
+Backend selection: config.json nfc.backend (auto|libnfc|pcsc|remote)
 """
 import sys
 import time
@@ -37,7 +37,11 @@ def get_backend(name=None):
 
 
 def read_badge(timeout=35, backend=None):
-    """Read badge, returns (uid, ndef_bytes). Polls until timeout or success."""
+    """Read badge, returns (uid, ndef_bytes).
+
+    timeout=None waits forever (continuous mode); a finite timeout returns
+    None after the deadline. Polls until timeout or success.
+    """
     cfg = load_config()
     interval = cfg.get("nfc", {}).get("poll_interval", 0.5)
 
@@ -47,8 +51,8 @@ def read_badge(timeout=35, backend=None):
             "No NFC backend available (check the PC/SC reader, "
             "libnfc on Linux, or use --remote with the phone relay)")
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = None if timeout is None else time.time() + timeout
+    while deadline is None or time.time() < deadline:
         result = b.read_once()
         if result:
             return result

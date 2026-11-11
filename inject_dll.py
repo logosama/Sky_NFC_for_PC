@@ -1,6 +1,12 @@
 """inject_dll.py - Windows DLL injector (ctypes calling kernel32, zero deps)
-Flow: OpenProcess -> VirtualAllocEx -> WriteProcessMemory(DLL path) -> CreateRemoteThread(LoadLibraryA)
-Usage: python3 inject_dll.py [process name] [DLL path]
+Flow: OpenProcess -> VirtualAllocEx -> WriteProcessMemory(DLL path) -> CreateRemoteThread(LoadLibraryW)
+
+Usage:
+    python3 inject_dll.py [process name] [DLL path]
+    SkyBadgeInjector.exe [process name] [DLL path]
+
+The default DLL path is sky_hook.dll next to this script (or next to the
+SkyBadgeInjector.exe standalone build).
 """
 import ctypes
 import ctypes.wintypes as wt
@@ -17,6 +23,13 @@ PAGE_READWRITE = 0x04
 INFINITE = 0xFFFFFFFF
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def app_dir():
+    """Directory of the running exe (frozen) or the source tree."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def _setup():
@@ -91,10 +104,15 @@ def inject(pid, dll_path):
 
     h_proc = kernel32.OpenProcess(PROCESS_ACCESS, False, pid)
     if not h_proc:
-        print(f"Error: OpenProcess failed (code {ctypes.get_last_error()})")
+        err = ctypes.get_last_error()
+        print(f"Error: OpenProcess failed (code {err})")
+        if err == 5:
+            print("Try running SkyBadgeInjector.exe as Administrator "
+                  "(Sky/Steam is likely elevated).")
         return False
 
-    dll_bytes = dll_path_abs.encode("ascii") + b"\x00"
+    # UTF-16 so non-ASCII install paths (e.g. a localized Windows user name) work.
+    dll_bytes = (dll_path_abs + "\x00").encode("utf-16-le")
     buf = kernel32.VirtualAllocEx(h_proc, None, len(dll_bytes), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
     if not buf:
         print(f"Error: VirtualAllocEx failed (code {ctypes.get_last_error()})")
@@ -108,9 +126,9 @@ def inject(pid, dll_path):
         return False
 
     h_kernel32 = kernel32.GetModuleHandleA(b"kernel32.dll")
-    loadlib = kernel32.GetProcAddress(h_kernel32, b"LoadLibraryA")
+    loadlib = kernel32.GetProcAddress(h_kernel32, b"LoadLibraryW")
     if not loadlib:
-        print("Error: LoadLibraryA not found")
+        print("Error: LoadLibraryW not found")
         kernel32.CloseHandle(h_proc)
         return False
 
@@ -128,9 +146,17 @@ def inject(pid, dll_path):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+        print("OK self-test")
+        return
+
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        print("Error: SkyBadgeInjector must be 64-bit to match Sky.exe")
+        sys.exit(1)
+
     proc_name = sys.argv[1] if len(sys.argv) > 1 else "Sky.exe"
     dll_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "sky_hook.dll")
+        app_dir(), "sky_hook.dll")
 
     pid = find_pid_by_name(proc_name)
     if not pid:

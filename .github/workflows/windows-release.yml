@@ -1,0 +1,229 @@
+name: Windows release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-latest
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  GAME_BUILD: "0.35.2 (CL 426499)"
+
+jobs:
+  hook-dll:
+    name: sky_hook.dll (mingw-w64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64
+      - name: Build hook DLL
+        run: |
+          set -euo pipefail
+          x86_64-w64-mingw32-gcc -shared -O2 -static-libgcc \
+            -o sky_hook.dll hook/common.c hook/windows.c -lws2_32
+          file sky_hook.dll
+          x86_64-w64-mingw32-objdump -p sky_hook.dll | grep 'DLL Name'
+          if x86_64-w64-mingw32-objdump -p sky_hook.dll | grep -qi 'libgcc'; then
+            echo "sky_hook.dll must not depend on libgcc_s"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sky-hook-dll
+          path: sky_hook.dll
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: PyInstaller (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+          python -m PyInstaller --version
+      - name: Byte-compile check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile badge_inject.py inject_dll.py runtime.py
+          python -m py_compile nfc/__init__.py nfc/libnfc_cli.py nfc/pcsc_ctypes.py nfc/remote.py
+      - name: Build main tool (onefile)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/spec-onefile dist/onefile
+          python -m PyInstaller --noconfirm --clean --onefile --noupx \
+            --name SkyBadgeInject \
+            --add-data "config.json;." \
+            --collect-submodules nfc \
+            --hidden-import nfc.libnfc_cli \
+            --hidden-import nfc.pcsc_ctypes \
+            --hidden-import nfc.remote \
+            --exclude-module termios \
+            --distpath dist/onefile \
+            --workpath build/onefile \
+            --specpath build/spec-onefile \
+            badge_inject.py
+      - name: Build main tool (onedir)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/spec-onedir dist/onedir
+          python -m PyInstaller --noconfirm --clean --onedir --noupx \
+            --name SkyBadgeInject \
+            --add-data "config.json;." \
+            --collect-submodules nfc \
+            --hidden-import nfc.libnfc_cli \
+            --hidden-import nfc.pcsc_ctypes \
+            --hidden-import nfc.remote \
+            --exclude-module termios \
+            --distpath dist/onedir \
+            --workpath build/onedir \
+            --specpath build/spec-onedir \
+            badge_inject.py
+      - name: Build DLL injector (onefile)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/spec-injector dist/injector
+          python -m PyInstaller --noconfirm --clean --onefile --noupx \
+            --name SkyBadgeInjector \
+            --distpath dist/injector \
+            --workpath build/injector \
+            --specpath build/spec-injector \
+            inject_dll.py
+      - name: Smoke-test frozen entry points
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/onefile/SkyBadgeInject.exe
+          test -f dist/onedir/SkyBadgeInject/SkyBadgeInject.exe
+          test -f dist/injector/SkyBadgeInjector.exe
+          ./dist/onefile/SkyBadgeInject.exe --self-test
+          ./dist/onedir/SkyBadgeInject/SkyBadgeInject.exe --self-test
+          ./dist/injector/SkyBadgeInjector.exe --self-test
+      - name: Package onedir zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp config.json dist/onedir/SkyBadgeInject/config.json
+          cp README.md dist/onedir/SkyBadgeInject/README.md
+          (cd dist/onedir && python -m zipfile -c ../../SkyBadgeInject-onedir.zip SkyBadgeInject)
+          python - <<'PY'
+          import zipfile
+          z = zipfile.ZipFile('SkyBadgeInject-onedir.zip')
+          names = z.namelist()
+          assert 'SkyBadgeInject/SkyBadgeInject.exe' in names
+          assert 'SkyBadgeInject/config.json' in names
+          assert any(n.startswith('SkyBadgeInject/_internal/') for n in names)
+          assert z.testzip() is None
+          print(len(names), 'entries OK')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skybadge-windows
+          path: |
+            dist/onefile/SkyBadgeInject.exe
+            SkyBadgeInject-onedir.zip
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skybadge-injector
+          path: dist/injector/SkyBadgeInjector.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish rolling latest
+    needs: [hook-dll, windows]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: "*"
+          merge-multiple: true
+      - name: Verify artifacts and assemble bundle
+        run: |
+          set -euo pipefail
+          ls -lR release-assets
+          test -f release-assets/SkyBadgeInject.exe
+          test -f release-assets/SkyBadgeInjector.exe
+          test -f release-assets/SkyBadgeInject-onedir.zip
+          test -f release-assets/sky_hook.dll
+          mkdir -p bundle/SkyBadge-Windows
+          cp release-assets/SkyBadgeInject.exe bundle/SkyBadge-Windows/
+          cp release-assets/SkyBadgeInjector.exe bundle/SkyBadge-Windows/
+          cp release-assets/sky_hook.dll bundle/SkyBadge-Windows/
+          cp config.json bundle/SkyBadge-Windows/
+          cp README.md bundle/SkyBadge-Windows/
+          (cd bundle && zip -9 -r "$GITHUB_WORKSPACE/SkyBadge-Windows.zip" SkyBadge-Windows)
+          unzip -l SkyBadge-Windows.zip
+      - name: Move rolling latest tag
+        run: |
+          set -euo pipefail
+          git tag -f latest "$GITHUB_SHA"
+          git push --force origin refs/tags/latest
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: SkyBadge for Windows (latest)
+          token: ${{ secrets.GITHUB_TOKEN }}
+          make_latest: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
+          body: |
+            Rolling Windows build from `main` at ${{ github.sha }}.
+            Game build: ${{ env.GAME_BUILD }}.
+
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            | Asset | Contents |
+            | --- | --- |
+            | `SkyBadge-Windows.zip` | Full onefile package: main tool, injector, hook DLL, config, README |
+            | `SkyBadgeInject-onedir.zip` | Alternative folder build of the main tool (faster startup) |
+            | `SkyBadgeInject.exe` | Main tool, single file |
+            | `SkyBadgeInjector.exe` | DLL injector (run as Administrator if Sky is elevated) |
+            | `sky_hook.dll` | Hook loaded into Sky.exe |
+            | `config.json` | Editable config; place next to the exe |
+
+            Quick start: start Sky and log in -> run `SkyBadgeInjector.exe` -> run `SkyBadgeInject.exe` -> choose 1 (reader) or 2 (phone). No Python installation is required.
+
+            This release and its assets are replaced on every push to `main`.
+          files: |
+            release-assets/SkyBadgeInject.exe
+            release-assets/SkyBadgeInjector.exe
+            release-assets/sky_hook.dll
+            config.json
+            README.md
+            SkyBadge-Windows.zip
+            release-assets/SkyBadgeInject-onedir.zip

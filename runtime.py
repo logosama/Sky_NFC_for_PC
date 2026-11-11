@@ -15,13 +15,30 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
+def app_dir():
+    """Directory of the running exe (frozen) or the source tree."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return PROJECT_ROOT
+
+
+def config_paths():
+    """External editable config first (frozen), bundled copy second."""
+    paths = []
+    if getattr(sys, "frozen", False):
+        paths.append(os.path.join(app_dir(), "config.json"))
+    paths.append(os.path.join(PROJECT_ROOT, "config.json"))
+    return paths
+
+
 def load_config():
-    cfg_path = os.path.join(PROJECT_ROOT, "config.json")
-    try:
-        with open(cfg_path, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    for cfg_path in config_paths():
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            continue
+    return {}
 
 
 def runtime_dirs():

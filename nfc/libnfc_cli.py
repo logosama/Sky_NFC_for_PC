@@ -56,6 +56,11 @@ def _run_cli(args, timeout=5):
         proc.communicate()
         clear_stuck_claim()
         return ""
+    except BaseException:
+        # Ctrl+C/SIGTERM must not leave an orphaned CLI holding the reader.
+        proc.kill()
+        proc.communicate()
+        raise
 
 
 class LibnfcBackend:

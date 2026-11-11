@@ -10,7 +10,7 @@ NFC badge -> reader extracts NDEF URL -> TCP IPC -> hook in game process
           -> game main thread calls its own OnOpenedWithURL -> server verification -> badge effect
 ```
 
-Function addresses are **fixed** for the current game build (0.35.1, build 423272),
+Function addresses are **fixed** for the current game build (0.35.2, build 426499),
 validated by magic bytes at startup. If a game update breaks them, a pattern scan
 falls back to the signatures compiled into the hook (`SIG_*` in `hook/common.c`).
 
@@ -19,9 +19,11 @@ falls back to the signatures compiled into the hook (`SIG_*` in `hook/common.c`)
 ```
 ├── runtime.py          # Shared runtime-path logic (mirrors hook-side resolution)
 ├── config.json         # Configuration (NFC backend, timeouts)
-├── badge_inject.py     # Main tool (scan + inject, cross-platform)
+├── badge_inject.py     # Always-listening scan + auto-inject tool (cross-platform)
 ├── inject_dll.py       # Windows DLL injector
 ├── build.sh            # One-shot build for Linux .so + Windows .dll
+├── requirements-build.txt  # PyInstaller toolchain for Windows CI
+├── .github/workflows/windows-release.yml  # Windows exe + rolling release
 ├── hook/
 │   ├── common.c/h      # Shared core (trampoline/fixed addresses/TCP IPC/injection)
 │   ├── linux.c         # Linux platform layer (LD_PRELOAD)
@@ -55,6 +57,25 @@ makes it unwritable for the hook. The hook detects this and silently falls back
 to the config dir; the Python tools probe both locations, so everything keeps
 working without configuration.
 
+## Download (Windows, no Python required)
+
+Every push to `main` rebuilds a rolling `latest` release with standalone Windows
+binaries. Download the complete package:
+
+<https://github.com/logosama/Sky_NFC_for_PC/releases/latest/download/SkyBadge-Windows.zip>
+
+1. Start Sky and log in.
+2. Run `SkyBadgeInjector.exe` (run as Administrator if Sky/Steam is elevated).
+   It injects `sky_hook.dll`; keep both files next to each other.
+3. Run `SkyBadgeInject.exe`, choose `1` (external reader) or `2` (phone remote),
+   then scan badges. No Python installation is required.
+
+`config.json` next to the exe overrides the bundled defaults (remote port/token,
+cooldown, inject timeout). `SkyBadgeInject-onedir.zip` is an alternative folder
+build with faster startup and fewer antivirus false positives. The onefile exe
+is unsigned, so SmartScreen may require **More info -> Run anyway**. Only
+download from this repository's Releases page.
+
 ## Usage (Linux)
 
 1. Build: `./build.sh`
@@ -62,16 +83,22 @@ working without configuration.
    ```
    LD_PRELOAD=/path/to/sky_hook.so %command%
    ```
-3. Launch the game, log in, then run: `python3 badge_inject.py`
-4. Enter `s` and place the badge on the reader
+3. Launch the game and log in.
+4. Run `python3 badge_inject.py`, choose `1` (external reader) or `2` (phone
+   remote), then tap badges - each scan is parsed and injected automatically.
+   Ctrl+C stops the tool. Use `--reader` / `--remote` to skip the menu for
+   background use, and `--once` for a single scan.
 
-## Usage (Windows, verified)
+## Usage (Windows, from source)
+
+For a no-Python install, use the standalone release above. To run from source:
 
 1. Cross-compile on Linux: `./build.sh` (produces sky_hook.dll)
    or build on Windows: `x86_64-w64-mingw32-gcc -shared -O2 -o sky_hook.dll hook/common.c hook/windows.c -lws2_32`
 2. After starting the game run (64-bit Python; use an elevated shell if the
    game runs elevated): `python3 inject_dll.py`
-3. `python3 badge_inject.py` -> `s` -> place the badge
+3. Run `python3 badge_inject.py`, choose `1` or `2`, then scan badges - injection
+   is automatic; Ctrl+C stops it (`--remote` is recommended on Windows).
 
 The Windows path is implemented and was verified on native Windows against Sky
 0.35.1 (CL 423272): `ping` -> `hook OK` -> badge scan -> `INJECT done`,
@@ -113,9 +140,9 @@ so the app never caches dumps.
 **PC side**:
 
 1. Run `python3 badge_inject.py --remote` (starts the HTTP listener on port 8799,
-   configurable via `remote.port` in config.json; optional auth via `remote.token`)
-2. Enter `s` to open the scan window
-3. Allow inbound TCP 8799 through the firewall
+   configurable via `remote.port` in config.json; optional auth via `remote.token`).
+   Scans are auto-injected; no scan-window command is needed.
+2. Allow inbound TCP 8799 through the firewall
 
 **Phone side**:
 
@@ -171,10 +198,30 @@ adb logcat -s SkyBadgeRelay    # app log (read errors, POST failures)
 - Feedback: status text (UID + page progress) and vibration - short buzz on
   success, double buzz on failure.
 
+## Running continuously (background)
+
+Remote mode is the lowest-overhead always-on option: the HTTP thread blocks on
+`accept()` and the main loop blocks on the scan queue, so idle CPU is
+essentially zero (measured `0.000%` over 20 s idle, roughly 27 MB RSS on the
+development machine). The menu is only shown on a TTY; use a flag in the
+background:
+
+```bash
+nohup python3 -u badge_inject.py --remote > badge-relay.log 2>&1 &
+```
+
+For an external reader, PC/SC polling is in-process and light. The libnfc
+backend spawns `nfc-mfultralight` for each poll; idle cost is still modest
+(measured `0.25%` CPU / ~21 MB RSS over 20 s with libnfc on the development
+machine), but for long-running use prefer PC/SC or raise `nfc.poll_interval`
+to 1-2 seconds. `nfc.cooldown` (default 3 s) suppresses duplicate scans, and
+`nfc.inject_timeout` (default 10 s) bounds the wait for `INJECT done`. Use
+`--once` for a single scan.
+
 ## Troubleshooting
 
-- **Hook status**: run `python3 badge_inject.py` - the startup line shows
-  `pong main=1 hook=0 fn=0x141172670 vt=0x141f0ed80 ticks=N`.
+- **Hook status**: the tool waits for the game hook and prints
+  `OK hook connected (pong main=1 hook=0 fn=0x141172680 vt=0x141f0ed80 ticks=N)`.
   `fn=0x0` means the game image was not fully mapped yet or the game updated;
   check `hook.log`.
 - **Logs**: `~/.config/sky-badge/hook.log` (or `SKY_BADGE_DIR/hook.log`); trimmed to its
@@ -185,7 +232,13 @@ adb logcat -s SkyBadgeRelay    # app log (read errors, POST failures)
   that survives crashed readers. The libnfc backend clears it automatically and
   retries; if all else fails, replug the USB adapter.
 - **Badge not detected**: keep the badge still on the reader for a few seconds;
-  the reader polls continuously during the scan window.
+  the reader polls continuously while the tool is running.
+- **Remote listener won't start**: port 8799 is already in use (often an older
+  `badge_inject.py --remote`); stop it or change `remote.port` in config.json.
+- **Standalone build ignores config**: `config.json` must be next to
+  `SkyBadgeInject.exe`; the copy bundled inside the exe is only a fallback.
+- **SkyBadgeInjector access denied (code 5)**: run `SkyBadgeInjector.exe` as
+  Administrator when Sky/Steam is elevated.
 
 ## Handling game updates
 

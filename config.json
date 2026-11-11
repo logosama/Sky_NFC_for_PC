@@ -3,6 +3,8 @@
     "backend": "auto",
     "scan_timeout": 35,
     "poll_interval": 0.5,
+    "cooldown": 3.0,
+    "inject_timeout": 10.0,
     "badge_dump": "badge.mfd"
   },
   "remote": {

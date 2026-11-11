@@ -1,49 +1,115 @@
 #!/usr/bin/env python3
 """Sky badge injection tool (cross-platform)
-Scan NFC badge -> parse NDEF URL -> inject into game (game thread handles it with its own function)
+
+Always-listening mode: choose an external NFC reader or the phone remote relay
+once, then every badge scan is parsed and injected automatically. Injection
+still goes through the in-game hook, which executes it on the game thread.
 
 Dependencies:
 - Linux:  libnfc (PN532/ACR122) or pcsclite (PC/SC readers)
 - Windows: winscard.dll (built-in) or inject_dll.py + sky_hook.dll
 """
+import argparse
 import os
+import signal
 import socket
 import sys
 import time
 
-from runtime import find_runtime_file, load_config, PROJECT_ROOT
+from runtime import app_dir, find_runtime_file, load_config
+
+DEFAULT_IPC_TIMEOUT = 5.0
+HOOK_RETRY_TIMEOUT = 30.0
+HOOK_WAIT_POLL = 2.0
 
 
-def ipc_port():
-    """Read the random port hook is listening on"""
-    for _ in range(50):  # wait up to 5 seconds
+def log(message=""):
+    """Print and flush: important when stdout is redirected in the background."""
+    print(message, flush=True)
+
+
+# ============ Hook IPC ============
+
+class HookClient:
+    """Small TCP client for the hook, with a cached port and stale-port recovery."""
+
+    def __init__(self):
+        self.port = None
+
+    def _read_port(self):
         port_file = find_runtime_file("ipc_port")
-        if port_file:
+        if not port_file:
+            return None
+        try:
+            with open(port_file) as f:
+                return int(f.read().strip())
+        except (OSError, ValueError):
+            return None
+
+    def command(self, cmd, timeout=DEFAULT_IPC_TIMEOUT, quiet=False):
+        """Send one command; retry once after rereading the port file."""
+        last_error = None
+        for _ in (1, 2):
+            port = self.port or self._read_port()
+            if port is None:
+                if not quiet:
+                    log("  x hook not running (port file missing)")
+                return None
             try:
-                with open(port_file) as f:
-                    return int(f.read().strip())
-            except ValueError:
-                pass
-        time.sleep(0.1)
-    return None
-
-
-def ipc_cmd(cmd, timeout=30):
-    """Send command to hook over TCP"""
-    port = ipc_port()
-    if not port:
-        print("  x hook not running (port file missing)")
-        return None
-    try:
-        s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
-        s.sendall(cmd.encode() + b"\n")
-        resp = s.recv(8192).decode(errors="replace").strip()
-        s.close()
-        return resp
-    except OSError as e:
-        print(f"  x IPC error: {e}")
+                s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+                s.sendall(cmd.encode() + b"\n")
+                resp = s.recv(8192).decode(errors="replace").strip()
+                s.close()
+                if not resp:
+                    self.port = None
+                return resp or None
+            except OSError as e:
+                last_error = e
+                self.port = None
+        if not quiet:
+            log(f"  x IPC error: {last_error}")
         return None
 
+    def ping(self, quiet=False):
+        return self.command("ping", timeout=2.0, quiet=quiet)
+
+
+def wait_for_hook(hook, timeout=None, announce=False):
+    """Wait until the game's main hook process answers; None on timeout.
+
+    timeout=None waits forever (startup/continuous mode). A finite timeout is
+    used when a scan is already waiting and the game restarted mid-injection.
+    """
+    start = time.monotonic()
+    next_status = start + 30.0
+    warned = False
+    while True:
+        ping = hook.ping(quiet=True)
+        if ping and "main=1" in ping:
+            if warned or announce:
+                log(f"OK hook connected ({ping})")
+            return ping
+
+        now = time.monotonic()
+        if not warned:
+            log("WARN hook not connected; waiting for the game hook...")
+            if sys.platform == "win32":
+                log("  Windows: run SkyBadgeInjector.exe "
+                    "(as Administrator if Sky.exe is elevated)")
+            else:
+                log(f"  Linux launch options: LD_PRELOAD="
+                    f"{os.path.join(app_dir(), 'sky_hook.so')} %command%")
+            warned = True
+        elif now >= next_status:
+            log(f"  [hook] still waiting ({now - start:.0f}s)")
+            next_status = now + 30.0
+
+        if timeout is not None and now - start >= timeout:
+            return None
+        time.sleep(HOOK_WAIT_POLL)
+
+
+# ============ NDEF parsing ============
 
 def parse_ndef(data):
     """Parse NTAG215 NDEF TLV, extract URI (from page 4)"""
@@ -85,63 +151,228 @@ def parse_uri_record(ndef):
     return None
 
 
-def scan_badge(cfg, backend=None):
-    """Poll badge read through NFC backend"""
-    from nfc import read_badge
-    timeout = cfg.get("nfc", {}).get("scan_timeout", 35)
-    if backend == "remote":
-        print(f"  [scan] Waiting for phone scan... ({timeout}s window)")
-    else:
-        print(f"  [scan] Place badge on reader... ({timeout}s window, keep it there)")
+# ============ NFC source selection ============
+
+def reader_backend_name(cfg):
+    """Config backend for reader mode; never let config 'remote' hijack it."""
+    backend = cfg.get("nfc", {}).get("backend", "auto")
+    return "auto" if backend == "remote" else backend
+
+
+def pick_reader(cfg):
+    """Detect an external reader and return its backend name, or None."""
+    from nfc import get_backend
+    name = reader_backend_name(cfg)
+    log(f"  [nfc] detecting external reader ({name})...")
     try:
-        result = read_badge(timeout=timeout, backend=backend)
+        backend = get_backend(name)
+    except Exception as e:
+        log(f"  x reader detection failed: {e}")
+        return None
+    if not backend:
+        log("  x no external NFC reader found (libnfc/PC-SC)")
+        return None
+    log(f"  [nfc] backend: {backend.name}")
+    return backend.name
+
+
+def choose_mode(args, cfg):
+    """Return (mode, backend_name); menu only when no flag and a TTY is present."""
+    if args.remote:
+        return "remote", "remote"
+    if args.reader:
+        name = pick_reader(cfg)
+        if not name:
+            raise SystemExit(1)
+        return "reader", name
+
+    if not sys.stdin.isatty():
+        log("No mode selected and stdin is not a TTY. Pass --reader or --remote.")
+        raise SystemExit(2)
+
+    while True:
+        log("Select NFC source:")
+        log("  1) External NFC reader (auto-detect libnfc / PC-SC)")
+        log("  2) Phone remote (HTTP listener)")
+        log("  q) Quit")
+        try:
+            choice = input("Choice [1/2]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            log("\nGoodbye!")
+            raise SystemExit(0)
+        if choice in ("1", "r", "reader"):
+            name = pick_reader(cfg)
+            if name:
+                return "reader", name
+        elif choice in ("2", "p", "remote"):
+            return "remote", "remote"
+        elif choice in ("q", "quit", "exit"):
+            log("Goodbye!")
+            raise SystemExit(0)
+        else:
+            log("  invalid choice")
+
+
+def start_remote(cfg):
+    """Start the HTTP listener; return False if the port cannot be bound."""
+    from nfc import remote
+    port = cfg.get("remote", {}).get("port", 8799)
+    if not remote.ensure_server_started():
+        log(f"  x cannot start remote listener on 0.0.0.0:{port} (port in use?)")
+        return False
+    log(f"OK remote listener on 0.0.0.0:{port} (phone scans auto-inject)")
+    return True
+
+
+# ============ Scanning and injection ============
+
+def scan_badge(cfg, backend_name, timeout=None):
+    """One finite scan (used by --once); returns (uid, data) or None."""
+    from nfc import read_badge
+    if timeout is None:
+        timeout = cfg.get("nfc", {}).get("scan_timeout", 35)
+    if backend_name == "remote":
+        log(f"  [scan] Waiting for phone scan... ({timeout}s window)")
+    else:
+        log(f"  [scan] Place badge on reader... ({timeout}s window, keep it there)")
+    try:
+        return read_badge(timeout=timeout, backend=backend_name)
     except RuntimeError as e:
-        print(f"  x {e}")
+        log(f"  x {e}")
         return None
-    if not result:
-        print("  x badge not detected")
-        return None
-    return result
 
 
-def inject_url(url, cfg):
-    """Inject via IPC: ensure hook installed -> queue URL -> executed on game thread"""
-    ping = ipc_cmd("ping") or ""
-    print(f"  [status] {ping}")
+def wait_for_badge(cfg, backend_name):
+    """Block until a badge arrives; retry absent/busy readers without exiting."""
+    from nfc import read_badge
+    while True:
+        try:
+            return read_badge(timeout=None, backend=backend_name)
+        except RuntimeError as e:
+            log(f"  x {e}; retrying in 2s...")
+            time.sleep(2)
+        except OSError as e:
+            log(f"  x NFC error: {e}; retrying in 2s...")
+            time.sleep(2)
+
+
+def inject_url(url, cfg, hook):
+    """Install the hook if needed, queue the URL, and confirm INJECT done."""
+    retry_timeout = float(cfg.get("game", {}).get("hook_retry_timeout", HOOK_RETRY_TIMEOUT))
+    ping = wait_for_hook(hook, timeout=retry_timeout)
+    if not ping:
+        log("  x hook not available; scan dropped")
+        return False
+    log(f"  [status] {ping}")
     if "hook=0" in ping:
-        print("  [inject] installing hook...")
-        print(f"  [inject] {ipc_cmd('hook')}")
+        log("  [inject] installing hook...")
+        resp = hook.command("hook")
+        log(f"  [inject] {resp}")
+        if resp != "hook OK":
+            return False
 
-    print("  [inject] queueing URL (game thread will execute)...")
-    print(f"  [inject] {ipc_cmd(f'inject {url}')}")
+    # Queue the URL. A previous injection can still be pending, so retry busy.
+    queue_deadline = time.monotonic() + 5.0
+    while True:
+        resp = hook.command(f"inject {url}")
+        log(f"  [inject] {resp}")
+        if resp == "queued":
+            break
+        if resp == "busy" and time.monotonic() < queue_deadline:
+            time.sleep(0.5)
+            continue
+        if resp is None:
+            log("  x hook disconnected during inject; waiting...")
+            if not wait_for_hook(hook, timeout=retry_timeout):
+                return False
+            if time.monotonic() < queue_deadline:
+                continue
+        return False
 
-    time.sleep(3)  # wait for game thread to trigger
+    # The game executes the URL on its next analytics tick; poll the log.
     log_file = find_runtime_file("hook.log")
     if not log_file:
-        return
-    # hook.log holds entries from every process that loaded the hook plus all
-    # earlier sessions, so anchor on the hook's echo of our own inject command
-    # and report only that segment. The URL cannot identify the injection: the
-    # hook logs just its first 60 chars, which differ only in the anti-replay
-    # counter at the end of the URL, and "INJECT done" carries no URL at all.
-    with open(log_file, errors="replace") as f:
-        lines = f.read().splitlines()
+        log("  x hook.log not found")
+        return False
+    inject_timeout = float(cfg.get("nfc", {}).get("inject_timeout", 10.0))
+    deadline = time.monotonic() + inject_timeout
     anchor = f"CMD:inject {url}"
-    start = next((i for i in range(len(lines) - 1, -1, -1) if anchor in lines[i]), None)
-    if start is None:                      # command never reached the hook
-        hits = []
-    else:                                  # stop at the next injection, if any
-        end = next((j for j in range(start + 1, len(lines)) if "CMD:inject " in lines[j]),
-                   len(lines))
-        hits = [l for l in lines[start + 1:end] if "INJECT" in l]
-    if any("INJECT done" in l for l in hits):
-        print("  [result] OK injection executed!")
-        for line in hits:
-            print(f"  [log] {line}")
-    else:
-        print("  [result] injection not executed")
-        print(f"  [log] {log_file}")
+    while True:
+        try:
+            with open(log_file, errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            lines = []
+        start = next((i for i in range(len(lines) - 1, -1, -1) if anchor in lines[i]), None)
+        if start is not None:
+            end = next((j for j in range(start + 1, len(lines)) if "CMD:inject " in lines[j]),
+                       len(lines))
+            hits = [l for l in lines[start + 1:end] if "INJECT" in l]
+            if any("INJECT done" in l for l in hits):
+                log("  [result] OK injection executed!")
+                for line in hits:
+                    log(f"  [log] {line}")
+                return True
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
 
+    log("  [result] injection not executed (still queued?)")
+    log(f"  [log] {log_file}")
+    return False
+
+
+def handle_badge(result, cfg, hook):
+    """Parse one (uid, data) result and inject it; returns True on INJECT done."""
+    uid, data = result
+    log(f"  OK badge UID: {uid}")
+    url = parse_ndef(data)
+    if not url:
+        log("  x NDEF parse failed")
+        return False
+    log(f"  OK NDEF URL: {url[:70]}...")
+    return inject_url(url, cfg, hook)
+
+
+def run_loop(mode, backend_name, cfg, hook):
+    cooldown = float(cfg.get("nfc", {}).get("cooldown", 3.0))
+    last_url = None
+    last_time = 0.0
+    log("Waiting for badge... (Ctrl+C to quit)")
+    while True:
+        result = wait_for_badge(cfg, backend_name)
+        if not result:
+            continue
+        uid, data = result
+        url = parse_ndef(data)
+        if not url:
+            log("  x NDEF parse failed")
+            continue
+        now = time.monotonic()
+        if url == last_url and now - last_time < cooldown:
+            log("  [skip] duplicate scan within cooldown")
+            continue
+        log(f"  [{time.strftime('%H:%M:%S')}] OK badge UID: {uid}")
+        log(f"  OK NDEF URL: {url[:70]}...")
+        last_url, last_time = url, now
+        if inject_url(url, cfg, hook):
+            last_time = time.monotonic()
+        time.sleep(cooldown)
+        log("Waiting for next badge... (Ctrl+C to quit)")
+
+
+def run_once(mode, backend_name, cfg, hook):
+    ping = wait_for_hook(hook, timeout=5.0, announce=True)
+    if not ping:
+        log("  x hook not connected; cannot inject")
+        return 1
+    result = scan_badge(cfg, backend_name)
+    if not result:
+        return 1
+    return 0 if handle_badge(result, cfg, hook) else 1
+
+
+# ============ Misc ============
 
 def game_log_path():
     """Auto-locate game log per platform (overridable via config)"""
@@ -168,61 +399,57 @@ def game_log_path():
     return None
 
 
-def main():
-    remote_mode = "--remote" in sys.argv[1:]
-    print("=" * 60)
-    print("  Sky Badge Injection Tool")
-    print("=" * 60)
+def _sigterm(_signum, _frame):
+    raise KeyboardInterrupt
+
+
+def main(argv=None):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+    try:
+        signal.signal(signal.SIGTERM, _sigterm)
+    except (AttributeError, ValueError, OSError):
+        pass  # Windows may not deliver SIGTERM; Ctrl+C still works
+
+    parser = argparse.ArgumentParser(
+        description="Sky badge injection tool: choose a reader, then auto-inject every scan.")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--remote", action="store_true",
+                       help="phone relay over HTTP (listener starts immediately)")
+    group.add_argument("--reader", action="store_true",
+                       help="external NFC reader (auto-detect libnfc / PC-SC)")
+    parser.add_argument("--once", action="store_true",
+                        help="scan one badge within nfc.scan_timeout and exit")
+    parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+
+    if args.self_test:
+        # Exercise the dynamically imported backends for frozen-build CI.
+        from nfc import libnfc_cli, pcsc_ctypes, remote  # noqa: F401
+        log("OK self-test")
+        return 0
+
+    log("=" * 60)
+    log("  Sky Badge Injection Tool")
+    log("=" * 60)
     cfg = load_config()
+    hook = HookClient()
+    try:
+        mode, backend_name = choose_mode(args, cfg)
+        log(f"Mode: {mode} ({backend_name})")
 
-    ping = ipc_cmd("ping")
-    if ping and "main=1" in ping:
-        print(f"OK hook connected ({ping})")
-    else:
-        print("WARN hook not connected. For Linux configure Steam launch options:")
-        print(f"  LD_PRELOAD={os.path.join(PROJECT_ROOT, 'sky_hook.so')} %command%")
-        if sys.platform == "win32":
-            print("  For Windows run: python3 inject_dll.py")
-    print()
-    if remote_mode:
-        from nfc import remote
-        remote.ensure_server_started()
-        port = cfg.get("remote", {}).get("port", 8799)
-        print(f"Mode: remote (listening on 0.0.0.0:{port} - phone scans are queued)")
-    print("Commands:  s/scan scan badge and inject | h help | q quit")
-    print()
-
-    while True:
-        try:
-            cmd = input("sky> ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
-
-        if cmd in ("q", "quit", "exit"):
-            print("Goodbye!")
-            break
-        elif cmd in ("h", "help", ""):
-            print("  s/scan  scan badge and inject")
-            print("  q/quit  quit")
-        elif cmd in ("s", "scan"):
-            backend = "remote" if remote_mode else None
-            result = scan_badge(cfg, backend=backend)
-            if not result:
-                continue
-            uid, data = result
-            print(f"  OK badge UID: {uid}")
-
-            url = parse_ndef(data)
-            if not url:
-                print("  x NDEF parse failed")
-                continue
-            print(f"  OK NDEF URL: {url[:70]}...")
-
-            inject_url(url, cfg)
-        else:
-            print(f"  unknown command: {cmd}")
+        if mode == "remote" and not start_remote(cfg):
+            return 1
+        if args.once:
+            return run_once(mode, backend_name, cfg, hook)
+        wait_for_hook(hook, announce=True)
+        return run_loop(mode, backend_name, cfg, hook)
+    except KeyboardInterrupt:
+        log("\nGoodbye!")
+        return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

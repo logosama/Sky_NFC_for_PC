@@ -81,6 +81,7 @@ jobs:
             --hidden-import nfc.libnfc_cli \
             --hidden-import nfc.pcsc_ctypes \
             --hidden-import nfc.remote \
+            --hidden-import inject_dll \
             --exclude-module termios \
             --distpath dist/onefile \
             --workpath build/onefile \
@@ -98,6 +99,7 @@ jobs:
             --hidden-import nfc.libnfc_cli \
             --hidden-import nfc.pcsc_ctypes \
             --hidden-import nfc.remote \
+            --hidden-import inject_dll \
             --exclude-module termios \
             --distpath dist/onedir \
             --workpath build/onedir \
@@ -262,6 +264,21 @@ jobs:
           cp README.md bundle/SkyBadge-Windows/
           (cd bundle && zip -9 -r "$GITHUB_WORKSPACE/SkyBadge-Windows.zip" SkyBadge-Windows)
           unzip -l SkyBadge-Windows.zip
+      - name: Complete onedir package
+        run: |
+          set -euo pipefail
+          rm -rf onedir-complete
+          mkdir -p onedir-complete
+          unzip -q release-assets/SkyBadgeInject-onedir.zip -d onedir-complete
+          cp release-assets/sky_hook.dll onedir-complete/SkyBadgeInject/
+          cp config.json README.md onedir-complete/SkyBadgeInject/
+          rm -f release-assets/SkyBadgeInject-onedir.zip
+          (cd onedir-complete && zip -9 -r "$GITHUB_WORKSPACE/release-assets/SkyBadgeInject-onedir.zip" SkyBadgeInject)
+          unzip -l release-assets/SkyBadgeInject-onedir.zip | grep -E 'SkyBadgeInject/(SkyBadgeInject\.exe|sky_hook\.dll|config\.json)'
+          if unzip -l release-assets/SkyBadgeInject-onedir.zip | grep -q SkyBadgeInjector.exe; then
+            echo "onedir package must not contain SkyBadgeInjector.exe"
+            exit 1
+          fi
       - name: Generate SHA256SUMS
         run: |
           set -euo pipefail
@@ -297,15 +314,17 @@ jobs:
             | Asset | Contents |
             | --- | --- |
             | `SkyBadge-Windows.zip` | Full onefile package: main tool, injector, hook DLL, config, README |
-            | `SkyBadgeInject-onedir.zip` | Alternative folder build of the main tool (faster startup) |
-            | `SkyBadgeInject.exe` | Main tool, single file |
-            | `SkyBadgeInjector.exe` | DLL injector (run as Administrator if Sky is elevated) |
+            | `SkyBadgeInject-onedir.zip` | Main tool + sky_hook.dll + config; auto-injects, no separate injector (recommended if Defender blocks the injector) |
+            | `SkyBadgeInject.exe` | Main tool, single file (auto-injects if sky_hook.dll is next to it) |
+            | `SkyBadgeInjector.exe` | Manual DLL injector (run as Administrator if Sky is elevated) |
             | `sky_hook.dll` | Hook loaded into Sky.exe |
             | `config.json` | Editable config; place next to the exe |
             | `SkyBadgeRelay.apk` | Release-signed Android app (Android 8.0+, NFC required) |
             | `SHA256SUMS` | Checksums for all release binaries |
 
-            Windows quick start: start Sky and log in -> run `SkyBadgeInjector.exe` -> run `SkyBadgeInject.exe` -> choose 1 (reader) or 2 (phone). No Python installation is required.
+            Windows quick start (Defender-friendly): download `SkyBadgeInject-onedir.zip`, extract it, start Sky and log in, then run `SkyBadgeInject.exe` and choose 1 (reader) or 2 (phone). It automatically injects the `sky_hook.dll` next to it. If Sky/Steam is elevated, run it as Administrator. The full bundle still includes the manual `SkyBadgeInjector.exe`.
+
+            If Defender removes `sky_hook.dll` or the main exe, add an exclusion for only the extracted folder, verify `SHA256SUMS`, or see `docs/code-signing.md` in the repository.
 
             Android: install `SkyBadgeRelay.apk`, enter the PC IP and the `remote.token` from `config.json`. versionCode: ${{ github.run_number }}.
             If you previously installed the debug APK, uninstall it once first (`adb uninstall com.skybadge.relay`); app settings are not preserved.

@@ -60,20 +60,30 @@ working without configuration.
 ## Download (Windows, no Python required)
 
 Every push to `main` rebuilds a rolling `latest` release with standalone Windows
-binaries. Download the complete package:
+binaries. For machines where Defender blocks the injector, use the onedir
+package; it needs no separate injector:
+
+<https://github.com/logosama/Sky_NFC_for_PC/releases/latest/download/SkyBadgeInject-onedir.zip>
+
+1. Extract the zip and start Sky, then log in.
+2. Run `SkyBadgeInject.exe` (as Administrator if Sky/Steam is elevated). It
+   automatically injects the `sky_hook.dll` next to it.
+3. Choose `1` (external reader) or `2` (phone remote), then scan badges.
+
+The complete onefile package (also contains the manual `SkyBadgeInjector.exe`)
+is available at:
 
 <https://github.com/logosama/Sky_NFC_for_PC/releases/latest/download/SkyBadge-Windows.zip>
 
-1. Start Sky and log in.
-2. Run `SkyBadgeInjector.exe` (run as Administrator if Sky/Steam is elevated).
-   It injects `sky_hook.dll`; keep both files next to each other.
-3. Run `SkyBadgeInject.exe`, choose `1` (external reader) or `2` (phone remote),
-   then scan badges. No Python installation is required.
+The onefile main tool also auto-injects if `sky_hook.dll` is next to it. The
+`SkyBadgeInjector.exe` in the full bundle is only a manual fallback.
 
 `config.json` next to the exe overrides the bundled defaults (remote port/token,
-cooldown, inject timeout). `SkyBadgeInject-onedir.zip` is an alternative folder
-build with faster startup and fewer antivirus false positives. The onefile exe
-is unsigned, so SmartScreen may require **More info -> Run anyway**. Only
+cooldown, inject timeout). The onedir build has faster startup and fewer
+antivirus false positives. If Defender removes `sky_hook.dll` or the main exe,
+add an exclusion for only the extracted folder (see Security) or use the
+signing guidance in [docs/code-signing.md](docs/code-signing.md). The binaries
+are unsigned, so SmartScreen may require **More info -> Run anyway**. Only
 download from this repository's Releases page.
 
 Android app (release-signed):
@@ -106,16 +116,19 @@ previously installed the debug APK, uninstall it once first
 - **Checksums**: every release includes `SHA256SUMS`. Verify on Windows with
   `Get-FileHash` or `certutil -hashfile <file> SHA256`, or on Linux with
   `sha256sum -c SHA256SUMS`.
-- **Antivirus / SmartScreen**: prefer `SkyBadgeInject-onedir.zip`; PyInstaller
-  onefile and the DLL injector are heuristic-prone. The injector calls
+- **Antivirus / SmartScreen**: prefer `SkyBadgeInject-onedir.zip`. It contains
+  the main tool plus `sky_hook.dll` and injects the DLL in-process; there is no
+  separate `SkyBadgeInjector.exe` to quarantine. The onefile build and the
+  manual injector are more heuristic-prone; the injector calls
   `OpenProcess`/`WriteProcessMemory`/`CreateRemoteThread`, so Defender flagging
   it is expected behavior. Only run binaries from this repository's Releases.
   If you trust a checksum-verified extracted folder, add an exclusion for just
   that folder (never a whole drive or Downloads) and do not disable Defender
   globally. Report false positives to Microsoft. Fully removing SmartScreen
-  warnings requires a real code-signing certificate (Azure Trusted Signing or an
-  OV/EV certificate); self-signed certificates do not help and this project does
-  not have one configured.
+  warnings requires a real code-signing certificate (SignPath/Azure/OV/EV);
+  self-signed certificates do not help. See
+  [docs/code-signing.md](docs/code-signing.md) for eligibility, costs, and how
+  to integrate a certificate once you have one.
 - No signing keys, tokens, or certificates are stored in this repository. The
   Android release key lives only in GitHub Actions Secrets; assets are rebuilt
   from `main` on every push.
@@ -284,6 +297,11 @@ to 1-2 seconds. `nfc.cooldown` (default 3 s) suppresses duplicate scans, and
   `OK hook connected (pong main=1 hook=0 fn=0x141172680 vt=0x141f0ed80 ticks=N)`.
   `fn=0x0` means the game image was not fully mapped yet or the game updated;
   check `hook.log`.
+- **`hook still waiting` on Windows**: use `SkyBadgeInject-onedir.zip` and keep
+  `sky_hook.dll` next to `SkyBadgeInject.exe`; start Sky first, then run the
+  tool (as Administrator if Sky/Steam is elevated). The onedir build injects
+  automatically. If Defender removed the DLL, add an exclusion for only the
+  extracted folder; the manual `SkyBadgeInjector.exe` is only in the full bundle.
 - **Logs**: `~/.config/sky-badge/hook.log` (or `SKY_BADGE_DIR/hook.log`); trimmed to its
   newest half once it passes 256 KB (every process that loads the hook appends to it, so
   it would otherwise grow across sessions). After a scan the tool prints just that

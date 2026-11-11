@@ -21,6 +21,7 @@ from runtime import app_dir, find_runtime_file, load_config
 DEFAULT_IPC_TIMEOUT = 5.0
 HOOK_RETRY_TIMEOUT = 30.0
 HOOK_WAIT_POLL = 2.0
+AUTO_INJECT_INTERVAL = 10.0
 
 
 def log(message=""):
@@ -74,6 +75,38 @@ class HookClient:
         return self.command("ping", timeout=2.0, quiet=quiet)
 
 
+def try_auto_inject():
+    """Inject sky_hook.dll into Sky.exe on Windows.
+
+    Returns True if injection succeeded, False if it was attempted and failed
+    (missing DLL/module or permission error), or None if Sky.exe is not running
+    yet (caller should keep waiting and retry).
+    """
+    if sys.platform != "win32":
+        return None
+
+    dll_path = os.path.join(app_dir(), "sky_hook.dll")
+    if not os.path.isfile(dll_path):
+        log("  x sky_hook.dll not found next to SkyBadgeInject.exe")
+        log("    use the complete onedir zip or SkyBadge-Windows bundle")
+        return False
+    try:
+        import inject_dll
+    except Exception as e:
+        log(f"  x DLL injector module unavailable: {e}")
+        return False
+
+    pid = inject_dll.find_pid_by_name("Sky.exe")
+    if not pid:
+        return None
+    log(f"  [hook] injecting sky_hook.dll into Sky.exe (PID {pid})...")
+    ok = inject_dll.inject(pid, dll_path)
+    if not ok:
+        log("  x hook injection failed; if Sky/Steam is elevated, run "
+            "SkyBadgeInject.exe as Administrator")
+    return ok
+
+
 def wait_for_hook(hook, timeout=None, announce=False):
     """Wait until the game's main hook process answers; None on timeout.
 
@@ -83,6 +116,8 @@ def wait_for_hook(hook, timeout=None, announce=False):
     start = time.monotonic()
     next_status = start + 30.0
     warned = False
+    auto_inject_done = False
+    last_auto_inject = start - AUTO_INJECT_INTERVAL
     while True:
         ping = hook.ping(quiet=True)
         if ping and "main=1" in ping:
@@ -91,11 +126,18 @@ def wait_for_hook(hook, timeout=None, announce=False):
             return ping
 
         now = time.monotonic()
+        if (sys.platform == "win32" and not auto_inject_done
+                and now - last_auto_inject >= AUTO_INJECT_INTERVAL):
+            last_auto_inject = now
+            result = try_auto_inject()
+            if result is not None:  # None means Sky.exe is not running yet
+                auto_inject_done = True
+
         if not warned:
             log("WARN hook not connected; waiting for the game hook...")
             if sys.platform == "win32":
-                log("  Windows: run SkyBadgeInjector.exe "
-                    "(as Administrator if Sky.exe is elevated)")
+                log("  Windows: sky_hook.dll is injected automatically when Sky.exe is running.")
+                log("  Run SkyBadgeInject.exe as Administrator if Sky/Steam is elevated.")
             else:
                 log(f"  Linux launch options: LD_PRELOAD="
                     f"{os.path.join(app_dir(), 'sky_hook.so')} %command%")
@@ -432,6 +474,8 @@ def main(argv=None):
     if args.self_test:
         # Exercise the dynamically imported backends for frozen-build CI.
         from nfc import libnfc_cli, pcsc_ctypes, remote  # noqa: F401
+        if sys.platform == "win32":
+            import inject_dll  # noqa: F401
         log("OK self-test")
         return 0
 

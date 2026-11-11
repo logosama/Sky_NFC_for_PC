@@ -76,6 +76,50 @@ build with faster startup and fewer antivirus false positives. The onefile exe
 is unsigned, so SmartScreen may require **More info -> Run anyway**. Only
 download from this repository's Releases page.
 
+Android app (release-signed):
+
+<https://github.com/logosama/Sky_NFC_for_PC/releases/latest/download/SkyBadgeRelay.apk>
+
+Install it, enter the PC IP and the same `remote.token` as `config.json`. If you
+previously installed the debug APK, uninstall it once first
+(`adb uninstall com.skybadge.relay`) because the signing key changed.
+
+## Security (Windows firewall and antivirus)
+
+- **Firewall**: allow inbound TCP 8799 on the **Private** profile only, and
+  ideally scope it to the phone's address (elevated PowerShell):
+
+  ```powershell
+  New-NetFirewallRule -DisplayName "Sky Badge Relay (phone, LAN)" `
+    -Direction Inbound -Protocol TCP -LocalPort 8799 `
+    -Action Allow -Profile Private
+  # optional: add -RemoteAddress 192.168.1.50
+  ```
+
+  Do not create a Public-profile rule or forward port 8799 on the router. The
+  listener binds `0.0.0.0`; the firewall/network is the boundary.
+- **Token**: set a random `remote.token` in `config.json` and enter the same value
+  in the app. The PC warns when it starts with an empty token. The token is sent
+  over cleartext HTTP, so use a trusted WPA2/WPA3 LAN; it is the only access
+  control. The app stores it in private preferences and `allowBackup=false`
+  keeps it out of Android backups.
+- **Checksums**: every release includes `SHA256SUMS`. Verify on Windows with
+  `Get-FileHash` or `certutil -hashfile <file> SHA256`, or on Linux with
+  `sha256sum -c SHA256SUMS`.
+- **Antivirus / SmartScreen**: prefer `SkyBadgeInject-onedir.zip`; PyInstaller
+  onefile and the DLL injector are heuristic-prone. The injector calls
+  `OpenProcess`/`WriteProcessMemory`/`CreateRemoteThread`, so Defender flagging
+  it is expected behavior. Only run binaries from this repository's Releases.
+  If you trust a checksum-verified extracted folder, add an exclusion for just
+  that folder (never a whole drive or Downloads) and do not disable Defender
+  globally. Report false positives to Microsoft. Fully removing SmartScreen
+  warnings requires a real code-signing certificate (Azure Trusted Signing or an
+  OV/EV certificate); self-signed certificates do not help and this project does
+  not have one configured.
+- No signing keys, tokens, or certificates are stored in this repository. The
+  Android release key lives only in GitHub Actions Secrets; assets are rebuilt
+  from `main` on every push.
+
 ## Usage (Linux)
 
 1. Build: `./build.sh`
@@ -140,17 +184,18 @@ so the app never caches dumps.
 **PC side**:
 
 1. Run `python3 badge_inject.py --remote` (starts the HTTP listener on port 8799,
-   configurable via `remote.port` in config.json; optional auth via `remote.token`).
-   Scans are auto-injected; no scan-window command is needed.
-2. Allow inbound TCP 8799 through the firewall
+   configurable via `remote.port` in config.json). Set `remote.token` to a random
+   value and use the same token in the app; scans are auto-injected.
+2. Allow inbound TCP 8799 on the Private firewall profile (see
+   [Security](#security-windows-firewall-and-antivirus)).
 
 **Phone side**:
 
-1. Build: `cd android && ./gradlew assembleDebug`
-2. Install: `adb install app/build/outputs/apk/debug/app-debug.apk`
-   (or open `android/` in Android Studio)
-3. Open Sky Badge Relay, enter the PC's LAN IP (port/token optional), Save
-4. Hold the badge against the phone - a short vibration confirms success
+1. Download `SkyBadgeRelay.apk` from the latest Release (recommended), or build:
+   `cd android && ./gradlew assembleDebug` and install `app-debug.apk`.
+   The first release-signed install requires uninstalling a previous debug APK.
+2. Open Sky Badge Relay, enter the PC's LAN IP, port and `remote.token`, Save.
+3. Hold the badge against the phone - a short vibration confirms success.
 
 Protocol: `POST /inject` with JSON `{"data_base64": "<540-byte NTAG dump>"}`,
 optional `X-Auth-Token` header. The PC responds `200 {"status":"accepted"}`.
@@ -169,9 +214,22 @@ optional `X-Auth-Token` header. The PC responds `200 {"status":"accepted"}`.
 ```bash
 cd android
 ./gradlew assembleDebug        # debug APK -> app/build/outputs/apk/debug/
-./gradlew assembleRelease      # unsigned release APK (no minify in this project)
+./gradlew assembleRelease      # release APK -> app/build/outputs/apk/release/
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb logcat -s SkyBadgeRelay    # app log (read errors, POST failures)
+```
+
+Release builds are signed only when all four env vars are set:
+`ANDROID_KEYSTORE_PATH`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
+`ANDROID_KEY_PASSWORD`; otherwise CI refuses to publish and local builds stay
+unsigned. `ANDROID_VERSION_CODE` / `ANDROID_VERSION_NAME` override the defaults
+(CI uses `github.run_number`). The release keystore is kept outside the repo and
+stored as GitHub Actions Secrets; back it up, because losing it prevents updates
+to already-installed APKs. Verify with:
+
+```bash
+$ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs \
+  app/build/outputs/apk/release/app-release.apk
 ```
 
 **Build setup notes**
@@ -190,11 +248,13 @@ adb logcat -s SkyBadgeRelay    # app log (read errors, POST failures)
 
 - `MainActivity.kt`: NFC reader mode (`FLAG_READER_NFC_A |
   SKIP_NDEF_CHECK | NO_PLATFORM_SOUNDS`) keeps scans in-app and suppresses the
-  system browser; reads 135 NTAG215 pages via `NfcA.transceive` READ (0x30)
-  with a 250 ms per-command timeout, then POSTs the base64 dump on a background
-  executor; UI state runs on the main thread only.
-- Anti-replay: 3 s debounce between accepted scans plus a busy flag, so a scan
-  can never be sent twice.
+  system browser. It reads pages 0..131 in 33 four-page READ (0x30) commands,
+  then gets pages 132..134 from the last valid starts (129..131) - 36 commands
+  total instead of 135. The 540-byte dump is POSTed on a background executor;
+  all UI and `busy` state stay on the main thread.
+- Failure recovery: `busy` is reset in `finally` on every path (including
+  executor rejection), with a 750 ms retry cooldown after failure and the normal
+  3 s debounce after success, so one failed scan cannot block later scans.
 - Feedback: status text (UID + page progress) and vibration - short buzz on
   success, double buzz on failure.
 
@@ -239,6 +299,14 @@ to 1-2 seconds. `nfc.cooldown` (default 3 s) suppresses duplicate scans, and
   `SkyBadgeInject.exe`; the copy bundled inside the exe is only a fallback.
 - **SkyBadgeInjector access denied (code 5)**: run `SkyBadgeInjector.exe` as
   Administrator when Sky/Steam is elevated.
+- **Android install fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`**: the
+  release APK uses a different signing key than the old debug build; uninstall
+  it once with `adb uninstall com.skybadge.relay`.
+- **Phone cannot reach the PC**: allow TCP 8799 on the Private firewall profile,
+  make sure both devices are on the same LAN/subnet, and disable client/AP
+  isolation on the router. A token mismatch shows `PC returned HTTP 403`.
+- **SmartScreen/Defender warning**: see the Security section; prefer the onedir
+  zip, verify `SHA256SUMS`, and only add a narrow exclusion for a trusted folder.
 
 ## Handling game updates
 

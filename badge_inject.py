@@ -221,6 +221,10 @@ def start_remote(cfg):
         log(f"  x cannot start remote listener on 0.0.0.0:{port} (port in use?)")
         return False
     log(f"OK remote listener on 0.0.0.0:{port} (phone scans auto-inject)")
+    token = str(cfg.get("remote", {}).get("token", "") or "")
+    if not token:
+        log("WARN remote.token is empty: any device that can reach this PC on the LAN")
+        log("     can inject scans. Set remote.token in config.json and enter it in the app.")
     return True
 
 

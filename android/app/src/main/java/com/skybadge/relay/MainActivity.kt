@@ -3,8 +3,9 @@ package com.skybadge.relay
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.NfcA
-import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Base64
@@ -17,6 +18,7 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * Sky Badge Relay - reads a Sky badge (NTAG215) with the phone's NFC and
@@ -33,10 +35,12 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_TOKEN = "token"
         private const val DEFAULT_PORT = "8799"
         private const val DEBOUNCE_MS = 3000L
-        private const val TRANSCEIVE_TIMEOUT_MS = 250
+        private const val FAILURE_RETRY_MS = 750L
+        private const val TRANSCEIVE_TIMEOUT_MS = 500
         private const val READ_DEADLINE_MS = 10000L
         private const val NTAG_PAGES = 135 // NTAG215: pages 0..134, 4 bytes each
         private const val NTAG_TOTAL = NTAG_PAGES * 4
+        private const val BLOCK_PAGES = 4
         private val VIB_SUCCESS = longArrayOf(0, 120)
         private val VIB_ERROR = longArrayOf(0, 80, 120, 80)
     }
@@ -44,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     private var nfcAdapter: NfcAdapter? = null
     private var readerModeEnabled = false
     private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private lateinit var statusText: TextView
     private lateinit var ipEdit: TextInputEditText
@@ -51,10 +56,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tokenEdit: TextInputEditText
     private lateinit var saveButton: Button
 
-    @Volatile
+    // All three fields are only touched from the main thread.
     private var lastScanAt = 0L
-
-    @Volatile
+    private var lastAttemptFailed = false
     private var busy = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -113,52 +117,111 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
+        executor.shutdownNow()
+        super.onDestroy()
+    }
+
+    /** Reader-mode callbacks arrive on a binder thread; all UI work is main-thread. */
     private fun onTagDiscovered(tag: Tag) {
+        postUi { handleTagOnMain(tag) }
+    }
+
+    private fun postUi(block: () -> Unit) {
+        mainHandler.post {
+            if (!isFinishing && !isDestroyed) block()
+        }
+    }
+
+    private fun handleTagOnMain(tag: Tag) {
         val now = System.currentTimeMillis()
-        if (busy || now - lastScanAt < DEBOUNCE_MS) return
+        val cooldown = if (lastAttemptFailed) FAILURE_RETRY_MS else DEBOUNCE_MS
+        if (busy || now - lastScanAt < cooldown) return
         lastScanAt = now
-        busy = true
+        lastAttemptFailed = false
 
         val server = buildServerConfig()
         if (server == null) {
-            busy = false
-            setStatus(getString(R.string.status_error, "enter the PC IP first"), error = true)
+            lastAttemptFailed = true
+            lastScanAt = now
+            setStatus(getString(R.string.status_error, getString(R.string.error_no_pc_ip)), error = true)
             vibrate(VIB_ERROR)
             return
         }
 
+        busy = true
         val uidHex = tag.id.joinToString("") { "%02x".format(it) }.uppercase()
         setStatus(getString(R.string.status_reading, uidHex))
-        executor.execute {
-            val dump = readTag(tag) { page ->
-                runOnUiThread {
-                    setStatus(getString(R.string.status_reading_progress, page, NTAG_PAGES, uidHex))
+        try {
+            executor.execute { scanAndSend(tag, server, uidHex) }
+        } catch (e: RejectedExecutionException) {
+            busy = false
+            lastAttemptFailed = true
+            lastScanAt = System.currentTimeMillis()
+            setStatus(getString(R.string.status_error, getString(R.string.error_app_closing)), error = true)
+            vibrate(VIB_ERROR)
+        } catch (e: Exception) {
+            busy = false
+            lastAttemptFailed = true
+            lastScanAt = System.currentTimeMillis()
+            Log.w(TAG, "cannot start scan", e)
+            setStatus(getString(R.string.status_error, getString(R.string.error_unexpected)), error = true)
+            vibrate(VIB_ERROR)
+        }
+    }
+
+    private fun scanAndSend(tag: Tag, server: ServerConfig, uidHex: String) {
+        var failed = true
+        try {
+            val dump = readTag(tag) { pages ->
+                postUi {
+                    if (busy) {
+                        setStatus(
+                            getString(R.string.status_reading_progress, pages, NTAG_PAGES, uidHex),
+                        )
+                    }
                 }
             }
             if (dump == null) {
-                runOnUiThread {
-                    busy = false
+                postUi {
                     setStatus(
-                        getString(R.string.status_error, "badge read failed (keep it still on the phone)"),
+                        getString(R.string.status_error, getString(R.string.error_read_failed)),
                         error = true,
                     )
                     vibrate(VIB_ERROR)
                 }
-                return@execute
+                return
             }
-            runOnUiThread { setStatus(getString(R.string.status_sending, uidHex)) }
+            postUi { setStatus(getString(R.string.status_sending, uidHex)) }
             val err = postToPc(server, dump)
-            runOnUiThread {
-                busy = false
-                if (err == null) {
+            if (err == null) {
+                failed = false
+                postUi {
                     setStatus(getString(R.string.status_sent, uidHex))
                     vibrate(VIB_SUCCESS)
-                } else {
+                }
+            } else {
+                postUi {
                     setStatus(getString(R.string.status_error, err), error = true)
                     vibrate(VIB_ERROR)
                 }
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "scan failed", e)
+            postUi {
+                setStatus(getString(R.string.status_error, getString(R.string.error_unexpected)), error = true)
+                vibrate(VIB_ERROR)
+            }
+        } finally {
+            postUi { finishScan(failed) }
         }
+    }
+
+    private fun finishScan(failed: Boolean) {
+        busy = false
+        lastAttemptFailed = failed
+        lastScanAt = System.currentTimeMillis()
     }
 
     private data class ServerConfig(val ip: String, val port: Int, val token: String)
@@ -172,7 +235,13 @@ class MainActivity : AppCompatActivity() {
         return ServerConfig(ip, port, token)
     }
 
-    /** Read all NTAG215 pages via NfcA READ (0x30); returns 540 bytes or null. */
+    /**
+     * Read all NTAG215 pages via NfcA READ (0x30).
+     *
+     * READ always returns 16 bytes (four pages). Read pages 0..131 in 33
+     * four-page commands, then obtain pages 132..134 from the last valid
+     * starts (129..131) to avoid addressing page 135. 36 commands total.
+     */
     private fun readTag(tag: Tag, onProgress: (Int) -> Unit): ByteArray? {
         val nfcA = NfcA.get(tag) ?: return null
         nfcA.timeout = TRANSCEIVE_TIMEOUT_MS
@@ -180,13 +249,24 @@ class MainActivity : AppCompatActivity() {
         try {
             nfcA.connect()
             val dump = ByteArray(NTAG_TOTAL)
-            for (page in 0 until NTAG_PAGES) {
+            var page = 0
+            while (page + BLOCK_PAGES <= NTAG_PAGES) {
                 if (System.currentTimeMillis() > deadline) return null
                 val cmd = byteArrayOf(0x30.toByte(), page.toByte())
                 val resp = transceiveWithRetry(nfcA, cmd) ?: return null
-                if (resp.size < 4) return null
-                System.arraycopy(resp, 0, dump, page * 4, 4)
-                if (page % 15 == 0 || page == NTAG_PAGES - 1) onProgress(page + 1)
+                if (resp.size < BLOCK_PAGES * 4) return null
+                System.arraycopy(resp, 0, dump, page * 4, BLOCK_PAGES * 4)
+                page += BLOCK_PAGES
+                onProgress(page)
+            }
+            for (targetPage in (NTAG_PAGES - 3) until NTAG_PAGES) {
+                if (System.currentTimeMillis() > deadline) return null
+                val startPage = targetPage - 3 // 129, 130, 131
+                val cmd = byteArrayOf(0x30.toByte(), startPage.toByte())
+                val resp = transceiveWithRetry(nfcA, cmd) ?: return null
+                if (resp.size < 16) return null
+                System.arraycopy(resp, 12, dump, targetPage * 4, 4)
+                onProgress(targetPage + 1)
             }
             return dump
         } catch (e: Exception) {

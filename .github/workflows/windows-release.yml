@@ -76,7 +76,7 @@ jobs:
           mkdir -p build/spec-onefile dist/onefile
           python -m PyInstaller --noconfirm --clean --onefile --noupx \
             --name SkyBadgeInject \
-            --add-data "config.json;." \
+            --add-data "../../config.json;." \
             --collect-submodules nfc \
             --hidden-import nfc.libnfc_cli \
             --hidden-import nfc.pcsc_ctypes \
@@ -93,7 +93,7 @@ jobs:
           mkdir -p build/spec-onedir dist/onedir
           python -m PyInstaller --noconfirm --clean --onedir --noupx \
             --name SkyBadgeInject \
-            --add-data "config.json;." \
+            --add-data "../../config.json;." \
             --collect-submodules nfc \
             --hidden-import nfc.libnfc_cli \
             --hidden-import nfc.pcsc_ctypes \
